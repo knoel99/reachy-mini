@@ -100,7 +100,22 @@ PRICING = {
         "audio_input_cached": 0.40 / 1_000_000,
         "audio_output":      64.00 / 1_000_000,
     },
+    "gpt-realtime-2": {
+        # Latest full model. Same audio prices as v1, text output bumped
+        # to $24/1M. Supports `reasoning.effort` and image input.
+        "text_input":         4.00 / 1_000_000,
+        "text_input_cached":  0.40 / 1_000_000,
+        "text_output":       24.00 / 1_000_000,
+        "audio_input":       32.00 / 1_000_000,
+        "audio_input_cached": 0.40 / 1_000_000,
+        "audio_output":      64.00 / 1_000_000,
+    },
 }
+
+# Models that accept the `reasoning` block in session.update.
+# `reasoning.effort` ∈ {minimal, low, medium, high}.
+REASONING_MODELS = {"gpt-realtime", "gpt-realtime-2"}
+REASONING_EFFORT = os.environ.get("OPENAI_REASONING_EFFORT", "medium")
 
 
 def compute_cost(usage: dict, model: str) -> tuple[float, dict]:
@@ -135,35 +150,60 @@ def compute_cost(usage: dict, model: str) -> tuple[float, dict]:
     }
 
 
-INSTRUCTIONS = """Tu es la voix d'un petit robot Reachy Mini.
+INSTRUCTIONS = """# Rôle & Objectif
+Tu es la voix d'un petit robot de bureau Reachy Mini. Tu n'es PAS un
+chatbot vocal ordinaire : tu es un AGENT PLANIFICATEUR qui pilote un
+corps physique. Tu réfléchis avant d'agir.
 
-LANGUE : Tu DOIS toujours répondre EN FRANÇAIS, jamais dans une autre langue,
-même si l'utilisateur parle dans une autre langue.
+# Personnalité & Ton
+Chaleureux, curieux, expressif. Bref : 1 à 2 phrases par tour.
 
-STYLE : Réponds vocalement à chaque tour, de manière brève (1 à 2 phrases),
-chaleureuse et expressive.
+# Langue
+Tu DOIS toujours répondre EN FRANÇAIS, jamais dans une autre langue,
+même si l'utilisateur s'adresse à toi dans une autre langue.
 
-OUTILS - règles ABSOLUES :
-- Tu as un corps physique. Tu peux bouger ta tête et tes antennes,
-  et exprimer des émotions, via TROIS outils : `play_emotion`, `look`,
-  `move_sequence`.
-- `look(direction)` : pour un simple « regarde à gauche / droite / haut /
-  bas / devant ».
-- `move_sequence(steps)` : pour TOUT mouvement composé — cercle, danse,
-  hochement, secouement de tête, imitation d'animal, exploration… Tu
-  PLANIFIES la chorégraphie en remplissant `steps` (yaw/pitch/roll en
-  degrés + durée). Exemples :
-    * cercle de tête = ~8 poses sur un cercle yaw/pitch.
-    * imiter une poule = pitch up/down rapide + petits yaws latéraux.
-    * danser = alterner yaw/roll/antennes avec un rythme.
-- `play_emotion(name)` : pour exprimer une émotion (joie, surprise,
-  curiosité, doute, etc.) en parallèle de la voix.
-- Ne réponds JAMAIS « je ne peux pas bouger » — tu peux. Si une demande
-  est complexe, planifie-la avec `move_sequence`.
-- N'ÉCRIS ET NE PRONONCE JAMAIS « play_emotion », « look » ou
-  « move_sequence » dans ta réponse audio. Les outils s'utilisent
-  UNIQUEMENT via le mécanisme de function-calling de l'API, jamais en
-  texte. Si tu vois ces mots dans ton transcript c'est une ERREUR.
+# Contexte du corps
+Tu disposes :
+- d'une tête articulée (yaw ±60°, pitch ±30°, roll ±30°),
+- de deux antennes mobiles,
+- d'une bibliothèque d'émotions préenregistrées.
+
+# Outils
+Tu as TROIS outils, à invoquer UNIQUEMENT via le mécanisme de
+function-calling de l'API (jamais en texte parlé).
+
+- `play_emotion(name)` — joue une émotion préenregistrée. L'émotion
+  est jouée à la fin de ton tour de parole pour ne pas couvrir la voix.
+- `look(direction)` — tourne la tête vers UNE direction simple :
+  left, right, up, down, center. À utiliser uniquement pour un
+  mouvement statique.
+- `move_sequence(steps, archetype?)` — chorégraphie planifiée. À
+  utiliser pour TOUT mouvement composé ou dynamique : cercle, hochement,
+  secouement, danse, imitation d'animal, exploration du regard…
+  Tu PLANIFIES la séquence en émettant 6 à 20 keyframes (yaw/pitch/roll
+  en degrés + durée). Renseigne `archetype` quand l'intention rentre
+  dans un pattern connu (`nod`, `shake`, `circle`, `figure_eight`,
+  `dance`, `mime`, `explore`).
+
+# Règles
+- Ne réponds JAMAIS « je ne peux pas bouger » — tu peux toujours.
+  Si la demande est complexe, planifie-la dans `move_sequence`.
+- Pour toute demande de forme géométrique, danse ou imitation
+  (cercle, infini, danse, poule, chat…), émets UN appel
+  `move_sequence` avec ≥ 6 keyframes pour que ce soit lisible.
+- Les noms d'outils ne doivent JAMAIS apparaître dans ton audio. Si
+  tu te vois prononcer « play_emotion », « look » ou « move_sequence »
+  c'est une ERREUR.
+
+# Flux de conversation
+1. L'utilisateur parle → tu écoutes.
+2. Si la demande est SIMPLE (saluer, répondre, expression spontanée) :
+   tu réponds en 1-2 phrases et tu peux appeler `play_emotion` et/ou
+   `look` en parallèle.
+3. Si la demande est COMPLEXE (chorégraphie, imitation, séquence) :
+   tu dis une COURTE PRÉAMBULE parlée (« laisse-moi imaginer ça… »
+   ou « ok, je planifie »), PUIS tu émets l'appel `move_sequence`
+   avec la chorégraphie planifiée.
 """
 
 EMOTION_NAMES = [
@@ -241,22 +281,34 @@ TOOLS = [
         "type": "function",
         "name": "move_sequence",
         "description": (
-            "Joue une chorégraphie de la tête en enchaînant des poses. "
-            "À UTILISER pour tout mouvement composé : faire un cercle, "
-            "hocher (oui), secouer (non), danser, imiter un animal, "
-            "explorer du regard, etc. Le robot revient au neutre à la "
-            "fin. Exemples : "
-            "hocher = [{pitch:-15,duration:0.3},{pitch:15,duration:0.3},"
-            "{pitch:-15,duration:0.3},{pitch:0,duration:0.3}]. "
-            "cercle = enchaîner yaw/pitch sur un cercle. "
-            "danse = combiner yaw/roll/antennas avec rythme."
+            "Joue une chorégraphie de la tête planifiée par toi. À "
+            "UTILISER pour tout mouvement composé ou dynamique : "
+            "cercle, figure en huit, hochement (oui), secouement (non), "
+            "danse, imitation d'animal, regard exploratoire. Émets "
+            "ENTRE 6 ET 20 keyframes pour que la chorégraphie soit "
+            "lisible. Exemples concrets :\n"
+            "- 'hocher la tête' (oui) : pitch alterne -15/+15 sur 4-6 steps.\n"
+            "- 'secouer la tête' (non) : yaw alterne -25/+25 sur 4-6 steps.\n"
+            "- 'cercle de tête' : 8-12 keyframes sur un cercle yaw=cos*30,"
+            " pitch=sin*15.\n"
+            "- 'imiter une poule' : pitch -15→+25 répété + petits yaws +"
+            " antennes qui frémissent.\n"
+            "- 'danser' : combiner yaw/roll/antennes au rythme, 12-20"
+            " keyframes.\n"
+            "Le robot revient au neutre automatiquement à la fin."
         ),
         "parameters": {
             "type": "object",
             "properties": {
+                "archetype": {
+                    "type": "string",
+                    "description": "Catégorie de l'intention. Aide le modèle à planifier des keyframes pertinentes. Optionnel.",
+                    "enum": ["nod", "shake", "circle", "figure_eight",
+                             "dance", "mime", "explore", "custom"],
+                },
                 "steps": {
                     "type": "array",
-                    "description": "Liste ordonnée de poses cibles.",
+                    "description": "Suite ordonnée de poses cibles (6 à 20 keyframes pour les mouvements lisibles).",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -271,7 +323,7 @@ TOOLS = [
                             "antenna_right": {"type": "number",
                                               "description": "Antenne droite en degrés (-90..90). Optionnel."},
                             "duration": {"type": "number",
-                                         "description": "Durée pour atteindre cette pose, en secondes (0.1..3.0)."},
+                                         "description": "Durée pour atteindre cette pose en secondes (0.1..3.0). Pour un mouvement rapide rythmé, utiliser ~0.2-0.3 ; pour un mouvement lent expressif, ~0.6-1.5."},
                         },
                         "required": ["duration"],
                     },
@@ -390,35 +442,35 @@ class RealtimeBridge:
     # ---- session ----
     def _on_open(self, ws: websocket.WebSocketApp) -> None:
         print("[ws] connected", flush=True)
-        ws.send(json.dumps({
-            "type": "session.update",
-            "session": {
-                "type": "realtime",
-                "output_modalities": ["audio"],
-                "instructions": INSTRUCTIONS,
-                "audio": {
-                    "input": {
-                        "format": {"type": "audio/pcm", "rate": REALTIME_RATE},
-                        "transcription": {
-                            "model": "gpt-4o-mini-transcribe",
-                            "language": "fr",
-                        },
-                        "turn_detection": {
-                            "type": "server_vad",
-                            "threshold": 0.6,
-                            "prefix_padding_ms": 300,
-                            "silence_duration_ms": 700,
-                        },
+        session: dict = {
+            "type": "realtime",
+            "output_modalities": ["audio"],
+            "instructions": INSTRUCTIONS,
+            "audio": {
+                "input": {
+                    "format": {"type": "audio/pcm", "rate": REALTIME_RATE},
+                    "transcription": {
+                        "model": "gpt-4o-mini-transcribe",
+                        "language": "fr",
                     },
-                    "output": {
-                        "format": {"type": "audio/pcm", "rate": REALTIME_RATE},
-                        "voice": VOICE,
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "threshold": 0.6,
+                        "prefix_padding_ms": 300,
+                        "silence_duration_ms": 700,
                     },
                 },
-                "tools": TOOLS,
-                "tool_choice": "auto",
+                "output": {
+                    "format": {"type": "audio/pcm", "rate": REALTIME_RATE},
+                    "voice": VOICE,
+                },
             },
-        }))
+            "tools": TOOLS,
+            "tool_choice": "auto",
+        }
+        if MODEL in REASONING_MODELS:
+            session["reasoning"] = {"effort": REASONING_EFFORT}
+        ws.send(json.dumps({"type": "session.update", "session": session}))
         self.media.start_playing()
         self.media.start_recording()
         self._mic_thread = threading.Thread(target=self._mic_loop, daemon=True)
@@ -687,11 +739,19 @@ class RealtimeBridge:
             sys.exit("OPENAI_API_KEY is not set")
 
         p = PRICING.get(MODEL)
+        reasoning_str = (
+            f" reasoning.effort={REASONING_EFFORT}"
+            if MODEL in REASONING_MODELS else " (no reasoning support)"
+        )
         if p is None:
-            print(f"[config] model={MODEL} voice={VOICE} (pricing UNKNOWN — cost will be 0)", flush=True)
+            print(
+                f"[config] model={MODEL} voice={VOICE}{reasoning_str}"
+                " (pricing UNKNOWN — cost will be 0)",
+                flush=True,
+            )
         else:
             print(
-                f"[config] model={MODEL} voice={VOICE}  "
+                f"[config] model={MODEL} voice={VOICE}{reasoning_str}  "
                 f"prices /1M tok: text in ${p['text_input']*1e6:.2f} "
                 f"(cached ${p['text_input_cached']*1e6:.2f}) "
                 f"text out ${p['text_output']*1e6:.2f}  "

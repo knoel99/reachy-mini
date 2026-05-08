@@ -17,7 +17,8 @@ planifiées et expressions d'émotions sur le robot.
    ```bash
    ./run.sh             # modèle par défaut (lit OPENAI_REALTIME_MODEL)
    ./run.sh mini        # force gpt-realtime-mini
-   ./run.sh full        # force gpt-realtime (plus cher, meilleur)
+   ./run.sh full        # force gpt-realtime (v1, supporte reasoning.effort)
+   ./run.sh full2       # force gpt-realtime-2 (latest, recommandé)
    ```
 
 `run.sh` pose `GST_PLUGIN_PATH` (plugin Rust) + `LD_PRELOAD`
@@ -26,15 +27,25 @@ et charge `.env`.
 
 ## Choix du modèle
 
-| Modèle              | Coût audio in / out (par 1M tok) | Forces                                                    |
-| ------------------- | -------------------------------- | --------------------------------------------------------- |
-| `gpt-realtime-mini` | $10 / $20                        | Pas cher, conversation fluide, tool calls simples         |
-| `gpt-realtime`      | $32 / $64                        | Bien meilleur en planification, tool calls multi-étapes,  |
-|                     |                                  | suivi d'instructions complexes (chorégraphies, imitation) |
+| Modèle              | Audio in/out / 1M | `reasoning.effort` | Recommandé pour                                              |
+| ------------------- | ----------------- | ------------------ | ------------------------------------------------------------ |
+| `gpt-realtime-mini` | $10 / $20         | non supporté       | Conversation simple, faible coût                             |
+| `gpt-realtime`      | $32 / $64         | supporté           | Plus de tokens contexte, meilleur tool calling               |
+| `gpt-realtime-2`    | $32 / $64         | supporté           | **Latest**. Plan multi-étapes, chorégraphies, imitations     |
+
+`gpt-realtime-2` est commercialisé par OpenAI comme un *« reasoning voice
+agent »* qui peut « *think before it speaks* » et fait du *« interleaved
+thinking between tool calls »* — c'est notre cible pour les chorégraphies
+complexes (imite une poule, dessine un cercle, danse…).
+
+`reasoning.effort` accepte `minimal | low | medium | high`. Le pont
+défaut sur `medium` (configurable via `OPENAI_REASONING_EFFORT`).
+Plus haut = meilleur plan mais plus de latence et de tokens.
 
 À chaque tour le pont affiche `cost=$X cumul=$Y` et la session se termine
 sur `[cost] session total: $Z over N turn(s)`. Au démarrage une bannière
-`[config] model=... prices /1M tok: ...` rappelle le tarif en cours.
+`[config] model=... reasoning.effort=... prices /1M tok: ...` rappelle
+le tarif et les réglages en cours.
 
 ## Trouver l'IP du robot
 
