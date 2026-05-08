@@ -236,6 +236,7 @@ class RealtimeBridge:
         self._first_delta_t: float | None = None
         self._audio_chunks: int = 0
         self._pending_emotion: str | None = None  # tool-called during speech, played at end
+        self._needs_followup_response = False  # tool call → reply, sent at response.done
 
         # Cost
         self._cost_total = 0.0
@@ -411,10 +412,23 @@ class RealtimeBridge:
             if self._pending_emotion:
                 self.emotions.play(self._pending_emotion, min_interval=0.0)
                 self._pending_emotion = None
+            needs_followup = self._needs_followup_response
+            self._needs_followup_response = False
             self._reset_response_state()
+            if needs_followup:
+                # Now that the previous response is fully done, ask the model
+                # to react to the tool output(s).
+                self._send({"type": "response.create"})
 
         elif t == "error":
-            print(f"[ws] error: {evt.get('error')}", flush=True)
+            err = evt.get("error") or {}
+            code = err.get("code")
+            # Benign races: cancel arrives after the response naturally ends,
+            # or follow-up response.create races with response.done.
+            if code in ("response_cancel_not_active",
+                        "conversation_already_has_active_response"):
+                return
+            print(f"[ws] error: {err}", flush=True)
 
     def _play_audio_delta(self, b64_audio: str) -> None:
         pcm = pcm16_bytes_to_f32(base64.b64decode(b64_audio))
@@ -450,7 +464,10 @@ class RealtimeBridge:
                 "output": json.dumps({"status": result}),
             },
         })
-        self._send({"type": "response.create"})
+        # Defer response.create to response.done — sending it now while the
+        # current response is still active triggers
+        # `conversation_already_has_active_response`.
+        self._needs_followup_response = True
 
     # ---- lifecycle ----
     def _on_error(self, ws: websocket.WebSocketApp, err: Exception) -> None:
