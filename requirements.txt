@@ -1,0 +1,4 @@
+reachy-mini
+websocket-client
+numpy
+scipy
