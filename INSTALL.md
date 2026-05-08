@@ -106,8 +106,12 @@ unset PYTHONPATH
 /usr/bin/python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
-pip install -r requirements.txt
+pip install -e .
 ```
+
+> Le projet expose un package `reachy_voice` via `pyproject.toml`. Le
+> `-e` installe en mode éditable pour pouvoir modifier le code sans
+> réinstaller. Ça crée aussi le script `reachy-voice` dans le venv.
 
 ## 5. Configuration
 
@@ -172,7 +176,7 @@ de parole, le robot répond en audio et joue les émotions.
 export GST_PLUGIN_PATH=/opt/gst-plugins-rs/lib/x86_64-linux-gnu:$GST_PLUGIN_PATH
 export LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libstdc++.so.6:/usr/lib/x86_64-linux-gnu/libgcc_s.so.1"
 set -a; source .env; set +a
-python main.py
+python -m reachy_voice
 ```
 
 ---
@@ -186,7 +190,7 @@ mDNS `.local` non résolu (typique WSL2). Renseigner `REACHY_HOST=<ip>` dans `.e
 ### WebRTC `TimeoutError: timed out` sur `:8443`
 
 Le daemon rapporte une `wlan_ip` non routable depuis votre machine
-(autre interface du robot). Le `main.py` patche ça en forçant
+(autre interface du robot). Le Le bridge patche ça en forçant
 `wlan_ip = REACHY_HOST` quand cette variable est définie.
 
 ### `RuntimeError: Failed to create webrtcsrc element. Is the GStreamer webrtc rust plugin installed?`
@@ -211,13 +215,13 @@ export LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libstdc++.so.6:/usr/lib/x86_64-linu
 
 L'API GA Realtime a remplacé `modalities` par `output_modalities` et
 mis l'audio sous `session.audio.{input,output}.format.{type,rate}`.
-`main.py` est déjà à jour ; cette erreur signifie que vous avez une
+Le bridge est déjà à jour ; cette erreur signifie que vous avez une
 version pré-GA du code ou un fork divergent.
 
 ### `wake_up()` `TimeoutError: Task did not complete in time.`
 
 Le daemon rapporte `backend_status.ready=False` même quand les moteurs
-tournent. `main.py` capture l'exception et continue sans wake_up.
+tournent. Le bridge capture l'exception et continue sans wake_up.
 La conversation marche, mais l'animation de "réveil" est sautée.
 
 ### `error: cannot install package 'cargo-c …', it requires rustc 1.93 or newer`
@@ -260,7 +264,7 @@ source .venv/bin/activate
 
 ## Architecture
 
-- `main.py` ouvre un WebSocket vers `wss://api.openai.com/v1/realtime?model=gpt-realtime-mini`
+- Le bridge ouvre un WebSocket vers `wss://api.openai.com/v1/realtime?model=gpt-realtime-mini`
 - Audio mic Reachy → resampling 24 kHz PCM16 → `input_audio_buffer.append`
 - `response.output_audio.delta` (ou `response.audio.delta` pré-GA) →
   resampling vers la sortie Reachy → `media.push_audio_sample`

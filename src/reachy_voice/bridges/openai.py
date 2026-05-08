@@ -6,11 +6,8 @@ import os
 import sys
 from typing import TYPE_CHECKING
 
-from .voice_bridge import (
-    VoiceBridge,
-    REALTIME_RATE,
-    INSTRUCTIONS,
-)
+from .base import VoiceBridge, REALTIME_RATE
+from ..tools import INSTRUCTIONS
 
 if TYPE_CHECKING:
     from reachy_mini import ReachyMini

@@ -1,4 +1,0 @@
-reachy-mini
-websocket-client
-numpy
-scipy>=1.11.0

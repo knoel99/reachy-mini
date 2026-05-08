@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Lance main.py avec les chemins natifs nécessaires :
+# Lance le bridge avec les chemins natifs nécessaires :
 #  - le plugin GStreamer Rust webrtcsrc compilé sous /opt/gst-plugins-rs
 #  - les libstdc++/libgcc système (override miniconda dont les versions sont
 #    trop anciennes pour gstlibav)
 #  - les variables d'env du fichier .env
+#
+# Le package `reachy_voice` doit être installé dans le venv :
+#     .venv/bin/pip install -e .
 
 set -e
 cd "$(dirname "$0")"
@@ -18,7 +21,7 @@ export LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libstdc++.so.6:/usr/lib/x86_64-linu
 set -a; source .env; set +a
 
 # Shorthand: `./run.sh <provider> <model>` overrides provider/model without
-# editing .env. Any extra args are forwarded to main.py.
+# editing .env. Any extra args are forwarded to the bridge.
 #
 # OpenAI provider (default):
 #   ./run.sh mini    → provider=openai model=gpt-realtime-mini
@@ -47,4 +50,4 @@ case "${1:-}" in
     ;;
 esac
 
-exec python -u main.py "${EXTRA[@]}" "$@"
+exec python -u -m reachy_voice "${EXTRA[@]}" "$@"

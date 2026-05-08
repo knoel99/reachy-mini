@@ -4,6 +4,37 @@ Reachy Mini connecté aux **API Voice** (OpenAI Realtime ou xAI Grok Voice Think
 en WebSocket, avec mouvements de tête, chorégraphies planifiées et expressions
 d'émotions sur le robot.
 
+> **Mode text-only** — le modèle ne génère pas de TTS. Le robot
+> n'a pas de voix : il analyse la parole de l'utilisateur et réagit
+> uniquement via des appels d'outils (mouvement de tête + son
+> d'émotion préenregistré joint au mouvement).
+
+## Structure du projet
+
+```
+reachy-mini/
+├── pyproject.toml              # build metadata + dependencies
+├── run.sh                      # wrapper local (charge .env, GST_PLUGIN_PATH, …)
+├── README.md  INSTALL.md  LICENSE
+├── docs/
+│   ├── DEPLOY_ON_ROBOT.md      # déploiement systemd sur le Pi du robot
+│   └── GROK_INTEGRATION.md     # spécificités provider xAI
+├── scripts/
+│   └── export_emotion_sounds.py
+└── src/reachy_voice/           # package Python (importable, installable)
+    ├── __init__.py
+    ├── __main__.py             # entrypoint : python -m reachy_voice
+    ├── tools.py                # INSTRUCTIONS, LOOK_POSES, build_tools
+    ├── emotions.py             # EmotionPlayer (preload + push_audio_sample)
+    └── bridges/
+        ├── base.py             # VoiceBridge abstraite
+        ├── openai.py           # OpenAIRealtimeBridge
+        └── grok.py             # GrokVoiceBridge
+```
+
+Installation : `pip install -e .` (voir [INSTALL.md](./INSTALL.md)).
+Lancement : `./run.sh` ou `python -m reachy_voice` ou `reachy-voice`.
+
 ## Architecture et flux de l'application
 
 ### Flux complet : de la voix utilisateur à la réponse du robot
@@ -204,28 +235,29 @@ le tarif et les réglages en cours.
 Le modèle invoque ces fonctions via le mécanisme function-calling de
 l'API Realtime (jamais en texte) :
 
-- **`play_emotion(name)`** — joue une émotion préenregistrée (joie,
-  surprise, curiosité, doute…). 34 émotions issues du dataset HF
-  `pollen-robotics/reachy-mini-emotions-library`. L'émotion appelée
-  pendant que le bot parle est mise en file et jouée à `response.done`
-  pour ne pas couvrir la voix.
+- **`play_emotion(name)`** — joue une émotion préenregistrée
+  (mouvement + son audio joint). Toutes les émotions du dataset HF
+  `pollen-robotics/reachy-mini-emotions-library` sont disponibles
+  dynamiquement (l'enum est généré au démarrage depuis
+  `library.list_moves()` — actuellement ~81 émotions).
 - **`look(direction)`** — tourne la tête vers `left`, `right`, `up`,
-  `down`, `center`. Bouge en parallèle de la voix (silencieux).
+  `down`, `center`.
 - **`move_sequence(steps)`** — chorégraphie planifiée. Chaque step
   contient `yaw`, `pitch`, `roll` (degrés), optionnellement
   `antenna_left`/`antenna_right` (degrés) et `duration` (secondes).
   À utiliser pour : faire un cercle de tête, hocher, secouer, danser,
   imiter un animal, explorer du regard.
 
-Barge-in actif : si tu parles pendant que le robot répond, le pont
-envoie `response.cancel` + `conversation.item.truncate` pour que le
-robot s'arrête immédiatement.
+Barge-in actif : si tu parles pendant que le modèle est en train de
+générer une réponse, le pont envoie `response.cancel`. Comme il n'y
+a pas de TTS à tronquer, c'est suffisant.
 
 ## Voir aussi
 
 - [INSTALL.md](./INSTALL.md) — installation complète + dépannage
 - [docs/GROK_INTEGRATION.md](./docs/GROK_INTEGRATION.md) — documentation de l'intégration Grok Voice
-- [bridges/README.md](./bridges/README.md) — documentation des bridges API
+- [src/reachy_voice/bridges/README.md](./src/reachy_voice/bridges/README.md) — documentation des bridges API
+- [docs/DEPLOY_ON_ROBOT.md](./docs/DEPLOY_ON_ROBOT.md) — déploiement autonome sur le Pi du robot
 - [OpenAI Realtime API docs](https://developers.openai.com/api/docs/guides/realtime-websocket)
 - [xAI Voice Agent API docs](https://docs.x.ai/developers/model-capabilities/audio/voice-agent)
 - [Reachy Mini SDK](https://github.com/pollen-robotics/reachy_mini)

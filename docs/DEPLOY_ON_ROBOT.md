@@ -1,11 +1,12 @@
 # Déployer le bridge sur le robot (mode autonome)
 
-Ce document décrit comment exécuter le bridge `main.py` directement sur
-le Raspberry Pi intégré au Reachy Mini Wireless, sans PC dans la boucle.
+Ce document décrit comment exécuter le bridge `reachy_voice` directement
+sur le Raspberry Pi intégré au Reachy Mini Wireless, sans PC dans la
+boucle.
 
 ## Pourquoi
 
-Dans le setup par défaut (`main.py` sur PC, `REACHY_HOST` sur le robot),
+Dans le setup par défaut (bridge sur PC, `REACHY_HOST` sur le robot),
 le PC lit les WAVs des émotions depuis son cache HuggingFace local et
 streame les samples au robot via **WebRTC**. Le Pi du robot ne sert
 qu'à faire tourner le daemon et à router le hardware.
@@ -28,7 +29,7 @@ Le SDK `reachy-mini` fait de l'auto-détection du backend média
 1. Si l'endpoint IPC du daemon est joignable en local → backend `LOCAL`.
 2. Sinon → backend `WEBRTC`.
 
-Donc le **même `main.py`** fonctionne :
+Donc le **même package `reachy_voice`** fonctionne :
 
 - Sur PC, sans daemon local ⇒ `WEBRTC` (situation actuelle).
 - Sur le Pi, avec daemon sur localhost ⇒ `LOCAL` (situation cible).
@@ -48,11 +49,10 @@ contient :
 
 ```
 reachy-mini/
-├── bridges/
+├── src/reachy_voice/         # package
 ├── scripts/
-├── main.py
-├── requirements.txt
-└── .env          # OPENAI_API_KEY=…  (sans REACHY_HOST)
+├── pyproject.toml
+└── .env                      # OPENAI_API_KEY=…  (sans REACHY_HOST)
 ```
 
 `.env` doit contenir uniquement :
@@ -69,7 +69,7 @@ Pas de `REACHY_HOST` : le SDK utilisera `localhost` par défaut.
 
 ```bash
 ssh pi@reachy-mini.local "mkdir -p ~/voice-bridge"
-scp -r bridges scripts main.py requirements.txt .env pi@reachy-mini.local:~/voice-bridge/
+scp -r src scripts pyproject.toml README.md LICENSE .env pi@reachy-mini.local:~/voice-bridge/
 ```
 
 (Le hostname exact peut varier ; remplacer par l'IP LAN si mDNS ne
@@ -81,13 +81,15 @@ résout pas.)
 ssh pi@reachy-mini.local
 cd ~/voice-bridge
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install --upgrade pip
+.venv/bin/pip install -e .
 ```
 
-`reachy-mini` est probablement déjà installé en système (le daemon
-l'utilise). Le venv aura sa propre copie — c'est plus propre et évite
-les conflits si un jour tu mets à jour le bridge sans toucher au
-daemon.
+`pip install -e .` lit `pyproject.toml`, installe les dépendances et
+crée le script `reachy-voice` dans le venv. `reachy-mini` est
+probablement déjà installé en système (le daemon l'utilise) — le venv
+aura sa propre copie, c'est plus propre et évite les conflits si tu
+mets à jour le bridge sans toucher au daemon.
 
 > ⚠️ Si le venv installe une version de `reachy-mini` plus récente que
 > celle du daemon, vérifier la compatibilité de l'API client/serveur.
@@ -99,7 +101,8 @@ daemon.
 ```bash
 cd ~/voice-bridge
 set -a; source .env; set +a
-.venv/bin/python main.py
+.venv/bin/reachy-voice
+# ou : .venv/bin/python -m reachy_voice
 ```
 
 Au démarrage, on doit voir dans les logs :
@@ -130,7 +133,7 @@ Type=simple
 User=pi
 WorkingDirectory=/home/pi/voice-bridge
 EnvironmentFile=/home/pi/voice-bridge/.env
-ExecStart=/home/pi/voice-bridge/.venv/bin/python main.py
+ExecStart=/home/pi/voice-bridge/.venv/bin/reachy-voice
 Restart=on-failure
 RestartSec=5
 

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reachy-voice"
+version = "0.1.0"
+description = "Voice bridge for Reachy Mini (OpenAI Realtime / Grok Voice Think Fast). Text-only model output, robot reacts via head movements + preloaded emotion sounds."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "knoel99" }]
+dependencies = [
+    "reachy-mini",
+    "websocket-client",
+    "numpy",
+    "scipy>=1.11.0",
+]
+
+[project.scripts]
+reachy-voice = "reachy_voice.__main__:main"
+
+[project.urls]
+Repository = "https://github.com/knoel99/reachy-mini"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+reachy_voice = ["py.typed"]
