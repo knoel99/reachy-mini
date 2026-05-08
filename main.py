@@ -122,17 +122,26 @@ STYLE : Réponds vocalement à chaque tour, de manière brève (1 à 2 phrases),
 chaleureuse et expressive.
 
 OUTILS - règles ABSOLUES :
-- Tu as un corps physique. Tu peux bouger ta tête et exprimer des émotions
-  via DEUX outils : `play_emotion` et `look`.
-- Quand l'utilisateur te demande de regarder ou tourner quelque part
-  (gauche, droite, haut, bas, devant), appelle `look(direction)`. Ne
-  réponds JAMAIS « je ne peux pas bouger » — tu peux.
-- Quand une émotion renforce naturellement ta réponse (joie, surprise,
-  curiosité, doute, etc.), appelle `play_emotion(name)` en plus de parler.
-- N'ÉCRIS ET NE PRONONCE JAMAIS « play_emotion » NI « look » dans ta
-  réponse audio. Les outils s'utilisent UNIQUEMENT via le mécanisme de
-  function-calling de l'API, jamais en texte. Si tu vois ces mots dans
-  ton transcript c'est une ERREUR.
+- Tu as un corps physique. Tu peux bouger ta tête et tes antennes,
+  et exprimer des émotions, via TROIS outils : `play_emotion`, `look`,
+  `move_sequence`.
+- `look(direction)` : pour un simple « regarde à gauche / droite / haut /
+  bas / devant ».
+- `move_sequence(steps)` : pour TOUT mouvement composé — cercle, danse,
+  hochement, secouement de tête, imitation d'animal, exploration… Tu
+  PLANIFIES la chorégraphie en remplissant `steps` (yaw/pitch/roll en
+  degrés + durée). Exemples :
+    * cercle de tête = ~8 poses sur un cercle yaw/pitch.
+    * imiter une poule = pitch up/down rapide + petits yaws latéraux.
+    * danser = alterner yaw/roll/antennes avec un rythme.
+- `play_emotion(name)` : pour exprimer une émotion (joie, surprise,
+  curiosité, doute, etc.) en parallèle de la voix.
+- Ne réponds JAMAIS « je ne peux pas bouger » — tu peux. Si une demande
+  est complexe, planifie-la avec `move_sequence`.
+- N'ÉCRIS ET NE PRONONCE JAMAIS « play_emotion », « look » ou
+  « move_sequence » dans ta réponse audio. Les outils s'utilisent
+  UNIQUEMENT via le mécanisme de function-calling de l'API, jamais en
+  texte. Si tu vois ces mots dans ton transcript c'est une ERREUR.
 """
 
 EMOTION_NAMES = [
@@ -190,9 +199,9 @@ TOOLS = [
         "type": "function",
         "name": "look",
         "description": (
-            "Tourne la tête de Reachy Mini dans une direction. À appeler "
-            "dès que l'utilisateur demande de regarder, tourner, ou "
-            "pencher la tête quelque part."
+            "Tourne la tête de Reachy Mini dans une direction simple. "
+            "Pour un mouvement composé (cercle, danse, imitation…), "
+            "utiliser plutôt `move_sequence`."
         ),
         "parameters": {
             "type": "object",
@@ -204,6 +213,49 @@ TOOLS = [
                 },
             },
             "required": ["direction"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "move_sequence",
+        "description": (
+            "Joue une chorégraphie de la tête en enchaînant des poses. "
+            "À UTILISER pour tout mouvement composé : faire un cercle, "
+            "hocher (oui), secouer (non), danser, imiter un animal, "
+            "explorer du regard, etc. Le robot revient au neutre à la "
+            "fin. Exemples : "
+            "hocher = [{pitch:-15,duration:0.3},{pitch:15,duration:0.3},"
+            "{pitch:-15,duration:0.3},{pitch:0,duration:0.3}]. "
+            "cercle = enchaîner yaw/pitch sur un cercle. "
+            "danse = combiner yaw/roll/antennas avec rythme."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "steps": {
+                    "type": "array",
+                    "description": "Liste ordonnée de poses cibles.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "yaw":   {"type": "number",
+                                      "description": "Yaw en degrés (-60..60). Positif=gauche, négatif=droite."},
+                            "pitch": {"type": "number",
+                                      "description": "Pitch en degrés (-30..30). Positif=bas, négatif=haut."},
+                            "roll":  {"type": "number",
+                                      "description": "Roll (penché côté) en degrés (-30..30)."},
+                            "antenna_left":  {"type": "number",
+                                              "description": "Antenne gauche en degrés (-90..90). Optionnel."},
+                            "antenna_right": {"type": "number",
+                                              "description": "Antenne droite en degrés (-90..90). Optionnel."},
+                            "duration": {"type": "number",
+                                         "description": "Durée pour atteindre cette pose, en secondes (0.1..3.0)."},
+                        },
+                        "required": ["duration"],
+                    },
+                },
+            },
+            "required": ["steps"],
         },
     },
 ]
@@ -290,6 +342,8 @@ class RealtimeBridge:
         self._audio_chunks: int = 0
         self._pending_emotion: str | None = None  # tool-called during speech, played at end
         self._needs_followup_response = False  # tool call → reply, sent at response.done
+        self._last_done_response_id: str | None = None  # dedupe response.done
+        self._move_thread: threading.Thread | None = None  # serialize sequences
 
         # Cost
         self._cost_total = 0.0
@@ -436,21 +490,26 @@ class RealtimeBridge:
         elif t in ("response.audio_transcript.done", "response.output_audio_transcript.done"):
             print(flush=True)
 
-        elif t in ("response.function_call_arguments.done", "response.output_item.done"):
-            if t == "response.output_item.done":
-                item = evt.get("item") or {}
-                if item.get("type") != "function_call":
-                    return
-                self._handle_tool_call({
-                    "name": item.get("name"),
-                    "call_id": item.get("call_id"),
-                    "arguments": item.get("arguments") or "{}",
-                })
-            else:
-                self._handle_tool_call(evt)
+        elif t == "response.output_item.done":
+            # Single source of truth for tool calls — both
+            # response.function_call_arguments.done and this event fire for
+            # the same call, so we use only this one.
+            item = evt.get("item") or {}
+            if item.get("type") != "function_call":
+                return
+            self._handle_tool_call({
+                "name": item.get("name"),
+                "call_id": item.get("call_id"),
+                "arguments": item.get("arguments") or "{}",
+            })
 
         elif t == "response.done":
-            usage = (evt.get("response") or {}).get("usage") or {}
+            rsp = evt.get("response") or {}
+            rsp_id = rsp.get("id")
+            if rsp_id and rsp_id == self._last_done_response_id:
+                return  # server occasionally re-sends response.done
+            self._last_done_response_id = rsp_id
+            usage = rsp.get("usage") or {}
             cost, br = compute_cost(usage, MODEL)
             self._cost_total += cost
             self._turns += 1
@@ -488,6 +547,60 @@ class RealtimeBridge:
         out = resample(pcm, REALTIME_RATE, self.out_rate)
         self.media.push_audio_sample(out)
 
+    def _run_move_async(self, fn) -> None:
+        """Run a movement off the WS thread. If a previous one is still
+        running, wait for it (so sequences don't trample each other)."""
+        prev = self._move_thread
+
+        def _wrapper() -> None:
+            if prev is not None and prev.is_alive():
+                prev.join(timeout=10.0)
+            try:
+                fn()
+            except Exception as e:
+                print(f"[move] failed: {e}", flush=True)
+
+        t = threading.Thread(target=_wrapper, daemon=True)
+        self._move_thread = t
+        t.start()
+
+    def _play_sequence(self, steps: list) -> None:
+        """Execute a planned head choreography. Each step has yaw/pitch/roll
+        in degrees, optional antenna_left/right in degrees, and a duration."""
+        for step in steps:
+            try:
+                roll = float(step.get("roll", 0.0))
+                pitch = float(step.get("pitch", 0.0))
+                yaw = float(step.get("yaw", 0.0))
+                # clamp to safe ranges
+                roll = max(-30.0, min(30.0, roll))
+                pitch = max(-30.0, min(30.0, pitch))
+                yaw = max(-60.0, min(60.0, yaw))
+                duration = max(0.1, min(3.0, float(step.get("duration", 0.4))))
+                pose = _make_head_pose(roll, pitch, yaw)
+
+                antennas = None
+                al = step.get("antenna_left")
+                ar = step.get("antenna_right")
+                if al is not None or ar is not None:
+                    al_rad = np.deg2rad(max(-90.0, min(90.0, float(al or 0.0))))
+                    ar_rad = np.deg2rad(max(-90.0, min(90.0, float(ar or 0.0))))
+                    antennas = [al_rad, ar_rad]
+
+                self.mini.goto_target(pose, antennas=antennas, duration=duration)
+            except Exception as e:
+                print(f"[seq] step failed: {e}", flush=True)
+                return
+        # back to neutral
+        try:
+            self.mini.goto_target(
+                INIT_HEAD_POSE,
+                antennas=INIT_ANTENNAS_JOINT_POSITIONS,
+                duration=0.5,
+            )
+        except Exception:
+            pass
+
     def _handle_tool_call(self, evt: dict) -> None:
         name = evt.get("name")
         call_id = evt.get("call_id")
@@ -513,14 +626,15 @@ class RealtimeBridge:
             if pose is None:
                 result = f"unknown_direction:{direction}"
             else:
-                # head movement is silent → run concurrently with speech
-                def _run_look() -> None:
-                    try:
-                        self.mini.goto_target(pose, duration=0.6)
-                    except Exception as e:
-                        print(f"[look] failed: {e}", flush=True)
-                threading.Thread(target=_run_look, daemon=True).start()
+                self._run_move_async(lambda: self.mini.goto_target(pose, duration=0.6))
                 result = f"looking:{direction}"
+        elif name == "move_sequence":
+            steps = args.get("steps") or []
+            if not steps:
+                result = "empty_sequence"
+            else:
+                self._run_move_async(lambda: self._play_sequence(steps))
+                result = f"playing:{len(steps)}_steps"
         else:
             result = f"unknown_tool:{name}"
 
