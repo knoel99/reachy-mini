@@ -37,8 +37,13 @@ sudo apt-get install -y \
     python3-gi \
     python3-gi-cairo \
     pkg-config \
-    python3-dev
+    python3-dev \
+    python3-venv
 ```
+
+> 💡 **`python3-venv` indispensable** : sur Ubuntu/Debian, sans ce paquet
+> `python3 -m venv .venv` ne crée que les symlinks Python — **pas** le
+> script `activate` ni `pip` (le module `ensurepip` est absent).
 
 > 💡 **Pourquoi `libgirepository1.0-dev` et pas `-2.0-dev`** : `reachy-mini`
 > dépend de PyGObject ≤ 3.46.0 qui requiert l'API v1 de
@@ -223,6 +228,20 @@ soit utiliser `cargo install cargo-c --version 0.10.20 --locked`.
 ### `PyGObject build failed: Package 'gobject-introspection-1.0' was not found`
 
 Installer `libgirepository1.0-dev` (et **pas** seulement `-2.0-dev`).
+
+### `.venv/bin/activate` n'existe pas après `python3 -m venv`
+
+Le `bin/` ne contient que les symlinks `python`, `python3`, `python3.12`,
+sans `activate` ni `pip`. Cause : le paquet `python3-venv` (ou
+`python3.X-venv` pour votre version) n'est pas installé, donc `ensurepip`
+échoue silencieusement et la création du venv s'arrête à mi-chemin.
+
+```bash
+sudo apt install python3-venv
+rm -rf .venv
+/usr/bin/python3 -m venv .venv
+source .venv/bin/activate
+```
 
 ### Le venv hérite des paquets miniconda
 

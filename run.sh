@@ -9,7 +9,7 @@ set -e
 cd "$(dirname "$0")"
 
 if [ ! -f .env ]; then
-  echo "Fichier .env manquant. cp .env.example .env puis renseigner OPENAI_API_KEY et REACHY_HOST." >&2
+  echo "Fichier .env manquant. cp .env.example .env puis renseigner les clés API et REACHY_HOST." >&2
   exit 1
 fi
 
@@ -17,16 +17,34 @@ export GST_PLUGIN_PATH=/opt/gst-plugins-rs/lib/x86_64-linux-gnu:${GST_PLUGIN_PAT
 export LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libstdc++.so.6:/usr/lib/x86_64-linux-gnu/libgcc_s.so.1${LD_PRELOAD:+:$LD_PRELOAD}"
 set -a; source .env; set +a
 
-# Shorthand: `./run.sh mini|full|full2` overrides the model without
+# Shorthand: `./run.sh <provider> <model>` overrides provider/model without
 # editing .env. Any extra args are forwarded to main.py.
-#   mini  → gpt-realtime-mini  (cheapest, weak planner)
-#   full  → gpt-realtime       (strong, supports reasoning.effort)
-#   full2 → gpt-realtime-2     (latest, best planner, supports reasoning.effort)
+#
+# OpenAI provider (default):
+#   ./run.sh mini    → provider=openai model=gpt-realtime-mini
+#   ./run.sh full    → provider=openai model=gpt-realtime
+#   ./run.sh full2   → provider=openai model=gpt-realtime-2
+#
+# xAI/Grok provider:
+#   ./run.sh grok    → provider=xai model=grok-voice-think-fast-1.0
+#
+# Custom:
+#   ./run.sh openai custom-model
+#   ./run.sh xai custom-model
 EXTRA=()
 case "${1:-}" in
-  mini)  EXTRA+=(--model gpt-realtime-mini); shift ;;
-  full)  EXTRA+=(--model gpt-realtime);      shift ;;
-  full2) EXTRA+=(--model gpt-realtime-2);    shift ;;
+  mini)  EXTRA+=(--provider openai --model gpt-realtime-mini); shift ;;
+  full)  EXTRA+=(--provider openai --model gpt-realtime);      shift ;;
+  full2) EXTRA+=(--provider openai --model gpt-realtime-2);    shift ;;
+  grok)  EXTRA+=(--provider xai --model grok-voice-think-fast-1.0); shift ;;
+  openai|xai)
+    EXTRA+=(--provider "$1")
+    shift
+    if [ -n "${1:-}" ]; then
+      EXTRA+=(--model "$1")
+      shift
+    fi
+    ;;
 esac
 
 exec python -u main.py "${EXTRA[@]}" "$@"

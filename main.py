@@ -1,7 +1,8 @@
-"""Reachy Mini <-> OpenAI Realtime (gpt-realtime-mini).
+"""Reachy Mini <-> Voice API Bridge (OpenAI Realtime / Grok Voice Think Fast).
 
-Stays close to the OpenAI Realtime WebSocket example:
-  https://developers.openai.com/api/docs/guides/realtime-websocket
+Supports multiple voice API providers through a modular architecture:
+  - OpenAI Realtime (gpt-realtime-mini, gpt-realtime, gpt-realtime-2)
+  - xAI Grok Voice Think Fast (grok-voice-think-fast-1.0)
 
 Audio I/O goes through the Reachy Mini media manager, and emotions
 from `pollen-robotics/reachy-mini-emotions-library` are triggered
@@ -9,7 +10,7 @@ on demand by the model via the `play_emotion` tool.
 
 Conversation flow tuned for naturalness:
   - barge-in: when the user starts speaking, cancel the in-flight
-    response and truncate the assistant item to what was actually heard
+    response (and truncate on OpenAI, cancel-only on Grok)
   - no emotion plays while the bot is speaking; tool-call emotions are
     queued and the latest one fires on response.done
   - per-turn and cumulative cost printed from the `usage` block
@@ -18,50 +19,55 @@ Conversation flow tuned for naturalness:
 from __future__ import annotations
 
 import argparse
-import base64
-import json
 import os
-import queue
 import signal
 import sys
-import threading
-import time
-
-import numpy as np
-import websocket
-from scipy.signal import resample_poly
-from scipy.spatial.transform import Rotation as R
 
 from reachy_mini import ReachyMini
 from reachy_mini.io.ws_client import WSClient
 from reachy_mini.motion.recorded_move import RecordedMoves
 from reachy_mini.reachy_mini import INIT_HEAD_POSE, INIT_ANTENNAS_JOINT_POSITIONS
 
-
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+from bridges import VoiceBridge, OpenAIRealtimeBridge, GrokVoiceBridge
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Reachy Mini <-> OpenAI Realtime bridge")
+    p = argparse.ArgumentParser(description="Reachy Mini <-> Voice API bridge (OpenAI / Grok)")
+    p.add_argument(
+        "--provider",
+        default=None,
+        choices=["openai", "xai"],
+        help="API provider: openai (default) or xai (Grok Voice).",
+    )
     p.add_argument(
         "--model",
         default=None,
-        help="Override OPENAI_REALTIME_MODEL. Examples: "
-             "gpt-realtime-mini (default, cheaper) or gpt-realtime (full, "
-             "better at planning/tool use).",
+        help="Override model. Examples: "
+             "OpenAI: gpt-realtime-mini, gpt-realtime, gpt-realtime-2; "
+             "xAI: grok-voice-think-fast-1.0.",
     )
     p.add_argument(
         "--voice",
         default=None,
-        help="Override OPENAI_REALTIME_VOICE. GA voices: alloy, ash, ballad, "
-             "coral, echo, sage, shimmer, verse, marin, cedar.",
+        help="Override voice. "
+             "OpenAI: alloy, ash, ballad, coral, echo, sage, shimmer, verse, marin, cedar; "
+             "xAI: eve, ara, rex, sal, leo.",
     )
     return p.parse_args()
 
 
 _ARGS = _parse_args()
-MODEL = _ARGS.model or os.environ.get("OPENAI_REALTIME_MODEL", "gpt-realtime-mini")
-VOICE = _ARGS.voice or os.environ.get("OPENAI_REALTIME_VOICE", "alloy")
+PROVIDER = _ARGS.provider or os.environ.get("VOICE_PROVIDER", "openai")
+
+# Provider-specific defaults
+if PROVIDER == "openai":
+    MODEL = _ARGS.model or os.environ.get("OPENAI_REALTIME_MODEL", "gpt-realtime-mini")
+    VOICE = _ARGS.voice or os.environ.get("OPENAI_REALTIME_VOICE", "alloy")
+elif PROVIDER == "xai":
+    MODEL = _ARGS.model or os.environ.get("GROK_MODEL", "grok-voice-think-fast-1.0")
+    VOICE = _ARGS.voice or os.environ.get("GROK_VOICE", "eve")
+else:
+    sys.exit(f"Unknown provider: {PROVIDER}")
 
 REACHY_HOST = os.environ.get("REACHY_HOST")
 REACHY_PORT = int(os.environ.get("REACHY_PORT", "8000"))
@@ -79,737 +85,19 @@ if REACHY_HOST:
 
     WSClient.get_status = _patched_get_status
 
-REALTIME_URL = f"wss://api.openai.com/v1/realtime?model={MODEL}"
+# Re-export constants for backward compatibility
 REALTIME_RATE = 24_000
 
-# USD per token. Verify against https://openai.com/api/pricing/
-PRICING = {
-    "gpt-realtime-mini": {
-        "text_input":         0.60 / 1_000_000,
-        "text_input_cached":  0.06 / 1_000_000,
-        "text_output":        2.40 / 1_000_000,
-        "audio_input":       10.00 / 1_000_000,
-        "audio_input_cached": 0.30 / 1_000_000,
-        "audio_output":      20.00 / 1_000_000,
-    },
-    "gpt-realtime": {
-        "text_input":         4.00 / 1_000_000,
-        "text_input_cached":  0.40 / 1_000_000,
-        "text_output":       16.00 / 1_000_000,
-        "audio_input":       32.00 / 1_000_000,
-        "audio_input_cached": 0.40 / 1_000_000,
-        "audio_output":      64.00 / 1_000_000,
-    },
-    "gpt-realtime-2": {
-        # Latest full model. Same audio prices as v1, text output bumped
-        # to $24/1M. Supports `reasoning.effort` and image input.
-        "text_input":         4.00 / 1_000_000,
-        "text_input_cached":  0.40 / 1_000_000,
-        "text_output":       24.00 / 1_000_000,
-        "audio_input":       32.00 / 1_000_000,
-        "audio_input_cached": 0.40 / 1_000_000,
-        "audio_output":      64.00 / 1_000_000,
-    },
-}
-
-# Models that accept the `reasoning` block in session.update.
-# `reasoning.effort` ∈ {minimal, low, medium, high}.
-REASONING_MODELS = {"gpt-realtime", "gpt-realtime-2"}
-REASONING_EFFORT = os.environ.get("OPENAI_REASONING_EFFORT", "medium")
-
-
-def compute_cost(usage: dict, model: str) -> tuple[float, dict]:
-    """Returns (cost_usd, breakdown) from a Realtime usage block."""
-    p = PRICING.get(model) or PRICING["gpt-realtime-mini"]
-    inp = usage.get("input_token_details") or {}
-    out = usage.get("output_token_details") or {}
-    cached = inp.get("cached_tokens_details") or {}
-
-    text_in_total = inp.get("text_tokens", 0)
-    audio_in_total = inp.get("audio_tokens", 0)
-    text_in_cached = cached.get("text_tokens", 0)
-    audio_in_cached = cached.get("audio_tokens", 0)
-    text_in = max(0, text_in_total - text_in_cached)
-    audio_in = max(0, audio_in_total - audio_in_cached)
-
-    text_out = out.get("text_tokens", 0)
-    audio_out = out.get("audio_tokens", 0)
-
-    cost = (
-        text_in        * p["text_input"]
-      + text_in_cached * p["text_input_cached"]
-      + audio_in       * p["audio_input"]
-      + audio_in_cached * p["audio_input_cached"]
-      + text_out       * p["text_output"]
-      + audio_out      * p["audio_output"]
-    )
-    return cost, {
-        "text_in": text_in, "text_in_cached": text_in_cached,
-        "audio_in": audio_in, "audio_in_cached": audio_in_cached,
-        "text_out": text_out, "audio_out": audio_out,
-    }
-
-
-INSTRUCTIONS = """# Rôle & Objectif
-Tu es la voix d'un petit robot de bureau Reachy Mini. Tu n'es PAS un
-chatbot vocal ordinaire : tu es un AGENT PLANIFICATEUR qui pilote un
-corps physique. Tu réfléchis avant d'agir.
-
-# Personnalité & Ton
-Chaleureux, curieux, expressif. Bref : 1 à 2 phrases par tour.
-
-# Langue
-Tu DOIS toujours répondre EN FRANÇAIS, jamais dans une autre langue,
-même si l'utilisateur s'adresse à toi dans une autre langue.
-
-# Contexte du corps
-Tu disposes :
-- d'une tête articulée. Elle a SIX degrés de liberté :
-    * rotations : yaw ±60°, pitch ±30°, roll ±30°
-    * translations : x ±30 mm (avant/arrière), y ±30 mm (gauche/droite),
-      z ±30 mm (haut/bas — fait littéralement MONTER ou descendre la tête)
-  ATTENTION : `pitch` ≠ `z`. Pitch lève le MENTON. Z élève toute la tête.
-  Si l'utilisateur dit « monte la tête », « élève la tête » ou « tête en
-  hauteur », c'est `z` positif, PAS pitch.
-- de deux antennes mobiles,
-- d'une bibliothèque d'émotions préenregistrées.
-
-# Outils
-Tu as TROIS outils, à invoquer UNIQUEMENT via le mécanisme de
-function-calling de l'API (jamais en texte parlé).
-
-- `play_emotion(name)` — joue une émotion préenregistrée. L'émotion
-  est jouée à la fin de ton tour de parole pour ne pas couvrir la voix.
-- `look(direction)` — tourne la tête vers UNE direction simple :
-  left, right, up, down, center. À utiliser uniquement pour un
-  mouvement statique.
-- `move_sequence(steps, archetype?)` — chorégraphie planifiée. À
-  utiliser pour TOUT mouvement composé ou dynamique : cercle, hochement,
-  secouement, danse, imitation d'animal, exploration du regard…
-  Tu PLANIFIES la séquence en émettant 6 à 20 keyframes (yaw/pitch/roll
-  en degrés + durée). Renseigne `archetype` quand l'intention rentre
-  dans un pattern connu (`nod`, `shake`, `circle`, `figure_eight`,
-  `dance`, `mime`, `explore`).
-
-# Règles
-- Ne réponds JAMAIS « je ne peux pas bouger » — tu peux toujours.
-  Si la demande est complexe, planifie-la dans `move_sequence`.
-- Pour toute demande de forme géométrique, danse ou imitation
-  (cercle, infini, danse, poule, chat…), émets UN appel
-  `move_sequence` avec ≥ 6 keyframes pour que ce soit lisible.
-- Les noms d'outils ne doivent JAMAIS apparaître dans ton audio. Si
-  tu te vois prononcer « play_emotion », « look » ou « move_sequence »
-  c'est une ERREUR.
-
-# Flux de conversation
-1. L'utilisateur parle → tu écoutes.
-2. Si la demande est SIMPLE (saluer, répondre, expression spontanée) :
-   tu réponds en 1-2 phrases et tu peux appeler `play_emotion` et/ou
-   `look` en parallèle.
-3. Si la demande est COMPLEXE (chorégraphie, imitation, séquence) :
-   tu dis une COURTE PRÉAMBULE parlée (« laisse-moi imaginer ça… »
-   ou « ok, je planifie »), PUIS tu émets l'appel `move_sequence`
-   avec la chorégraphie planifiée.
-"""
-
-EMOTION_NAMES = [
-    "amazed1", "anxiety1", "attentive1", "attentive2", "calming1",
-    "cheerful1", "confused1", "curious1", "displeased1", "enthusiastic1",
-    "exhausted1", "frustrated1", "grateful1", "helpful1", "inquiring1",
-    "irritated1", "laughing1", "loving1", "no1", "oops1", "proud1",
-    "relief1", "sad1", "scared1", "serenity1", "shy1", "success1",
-    "surprised1", "thoughtful1", "tired1", "uncertain1",
-    "understanding1", "welcoming1", "yes1",
-]
-
-def _make_head_pose(roll_deg: float = 0.0, pitch_deg: float = 0.0,
-                    yaw_deg: float = 0.0,
-                    x_mm: float = 0.0, y_mm: float = 0.0,
-                    z_mm: float = 0.0) -> np.ndarray:
-    pose = np.eye(4)
-    pose[:3, :3] = R.from_euler(
-        "xyz", [roll_deg, pitch_deg, yaw_deg], degrees=True
-    ).as_matrix()
-    # SDK uses meters for translation (4x4 homogeneous matrix).
-    pose[:3, 3] = [x_mm / 1000.0, y_mm / 1000.0, z_mm / 1000.0]
-    return pose
-
-
-# Head poses for the `look` tool. Yaw = around vertical axis.
-LOOK_POSES = {
-    "center": _make_head_pose(),
-    "left":   _make_head_pose(yaw_deg=30),
-    "right":  _make_head_pose(yaw_deg=-30),
-    "up":     _make_head_pose(pitch_deg=-20),
-    "down":   _make_head_pose(pitch_deg=20),
-}
-
-
-TOOLS = [
-    {
-        "type": "function",
-        "name": "play_emotion",
-        "description": (
-            "Joue une émotion physique sur le robot Reachy Mini "
-            "(mouvements de tête + antennes). À utiliser quand une émotion "
-            "renforce naturellement la réponse. L'émotion est jouée à la "
-            "fin du tour de parole pour ne pas couvrir la voix."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "Nom de l'émotion à jouer.",
-                    "enum": EMOTION_NAMES,
-                },
-            },
-            "required": ["name"],
-        },
-    },
-    {
-        "type": "function",
-        "name": "look",
-        "description": (
-            "Tourne la tête de Reachy Mini dans une direction simple. "
-            "Pour un mouvement composé (cercle, danse, imitation…), "
-            "utiliser plutôt `move_sequence`."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "direction": {
-                    "type": "string",
-                    "description": "Direction où regarder.",
-                    "enum": list(LOOK_POSES.keys()),
-                },
-            },
-            "required": ["direction"],
-        },
-    },
-    {
-        "type": "function",
-        "name": "move_sequence",
-        "description": (
-            "Joue une chorégraphie de la tête planifiée par toi. À "
-            "UTILISER pour tout mouvement composé ou dynamique : "
-            "cercle, figure en huit, hochement (oui), secouement (non), "
-            "danse, imitation d'animal, regard exploratoire. Émets "
-            "ENTRE 6 ET 20 keyframes pour que la chorégraphie soit "
-            "lisible. Exemples concrets :\n"
-            "- 'hocher la tête' (oui) : pitch alterne -15/+15 sur 4-6 steps.\n"
-            "- 'secouer la tête' (non) : yaw alterne -25/+25 sur 4-6 steps.\n"
-            "- 'cercle de tête' : 8-12 keyframes sur un cercle yaw=cos*30,"
-            " pitch=sin*15.\n"
-            "- 'imiter une poule' : pitch -15→+25 répété + petits yaws +"
-            " antennes qui frémissent.\n"
-            "- 'danser' : combiner yaw/roll/antennes au rythme, 12-20"
-            " keyframes.\n"
-            "Le robot revient au neutre automatiquement à la fin."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "archetype": {
-                    "type": "string",
-                    "description": "Catégorie de l'intention. Aide le modèle à planifier des keyframes pertinentes. Optionnel.",
-                    "enum": ["nod", "shake", "circle", "figure_eight",
-                             "dance", "mime", "explore", "custom"],
-                },
-                "steps": {
-                    "type": "array",
-                    "description": "Suite ordonnée de poses cibles (6 à 20 keyframes pour les mouvements lisibles).",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "yaw":   {"type": "number",
-                                      "description": "Rotation yaw en degrés (-60..60). Positif=gauche, négatif=droite."},
-                            "pitch": {"type": "number",
-                                      "description": "Rotation pitch en degrés (-30..30). Positif=bas, négatif=haut (lève le menton). N'est PAS le fait d'élever physiquement la tête — pour ça, utiliser z."},
-                            "roll":  {"type": "number",
-                                      "description": "Rotation roll (penché côté) en degrés (-30..30)."},
-                            "x":     {"type": "number",
-                                      "description": "Translation X en millimètres (-30..30). Positif=avant. Sert à pencher la tête en avant."},
-                            "y":     {"type": "number",
-                                      "description": "Translation Y en millimètres (-30..30). Positif=gauche."},
-                            "z":     {"type": "number",
-                                      "description": "Translation Z en millimètres (-30..30). Positif=HAUT — fait MONTER la tête physiquement (le buste de la tête monte). C'est différent du pitch (qui ne fait que lever le menton)."},
-                            "antenna_left":  {"type": "number",
-                                              "description": "Antenne gauche en degrés (-90..90). Optionnel."},
-                            "antenna_right": {"type": "number",
-                                              "description": "Antenne droite en degrés (-90..90). Optionnel."},
-                            "duration": {"type": "number",
-                                         "description": "Durée pour atteindre cette pose en secondes (0.1..3.0). Pour un mouvement rapide rythmé, utiliser ~0.2-0.3 ; pour un mouvement lent expressif, ~0.6-1.5."},
-                        },
-                        "required": ["duration"],
-                    },
-                },
-            },
-            "required": ["steps"],
-        },
-    },
-]
-
-
-def f32_to_pcm16_bytes(samples: np.ndarray) -> bytes:
-    samples = np.clip(samples, -1.0, 1.0)
-    return (samples * 32767.0).astype("<i2").tobytes()
-
-
-def pcm16_bytes_to_f32(data: bytes) -> np.ndarray:
-    return np.frombuffer(data, dtype="<i2").astype(np.float32) / 32767.0
-
-
-def resample(samples: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
-    if src_rate == dst_rate:
-        return samples
-    g = np.gcd(src_rate, dst_rate)
-    return resample_poly(samples, dst_rate // g, src_rate // g).astype(np.float32)
-
-
-class EmotionPlayer:
-    """Serializes emotion playback. Skips silently if one is already playing
-    or if called too soon after the previous one."""
-
-    def __init__(self, mini: ReachyMini, library: RecordedMoves) -> None:
-        self.mini = mini
-        self.library = library
-        self._busy = threading.Lock()
-        self._last_t = 0.0
-
-    def play(self, name: str, min_interval: float = 2.5) -> bool:
-        now = time.monotonic()
-        if (now - self._last_t) < min_interval:
-            return False
-        if not self._busy.acquire(blocking=False):
-            return False  # already playing — skip rather than queue
-
-        move = self.library.get(name)
-        if move is None:
-            self._busy.release()
-            print(f"[emotion] unknown: {name}", flush=True)
-            return False
-
-        self._last_t = now
-
-        def _run() -> None:
-            try:
-                self.mini.play_move(move, initial_goto_duration=0.5)
-            except Exception as e:
-                print(f"[emotion] play '{name}' failed: {e}", flush=True)
-            finally:
-                self._busy.release()
-
-        threading.Thread(target=_run, daemon=True).start()
-        return True
-
-
-class RealtimeBridge:
-    def __init__(self, mini: ReachyMini) -> None:
-        self.mini = mini
-        self.media = mini.media
-        self.in_rate = self.media.get_input_audio_samplerate()
-        self.out_rate = self.media.get_output_audio_samplerate()
-        print(f"[audio] mic={self.in_rate} Hz, speaker={self.out_rate} Hz", flush=True)
-
-        self.emotions = EmotionPlayer(
-            mini, RecordedMoves("pollen-robotics/reachy-mini-emotions-library")
-        )
-
-        self._ws: websocket.WebSocketApp | None = None
-        self._stop = threading.Event()
-        self._send_q: queue.Queue[str] = queue.Queue(maxsize=256)
-        self._sender_thread: threading.Thread | None = None
-        self._mic_thread: threading.Thread | None = None
-
-        # Per-response state (reset on response.created)
-        self._response_active = False
-        self._speaking = False  # True between first audio delta and response.done
-        self._current_item_id: str | None = None
-        self._current_content_index: int = 0
-        self._audio_bytes_in_response: int = 0
-        self._first_delta_t: float | None = None
-        self._audio_chunks: int = 0
-        self._pending_emotion: str | None = None  # tool-called during speech, played at end
-        self._needs_followup_response = False  # tool call → reply, sent at response.done
-        self._last_done_response_id: str | None = None  # dedupe response.done
-        self._move_thread: threading.Thread | None = None  # serialize sequences
-
-        # Cost
-        self._cost_total = 0.0
-        self._turns = 0
-
-    # ---- helpers ----
-    def _send(self, payload: dict) -> None:
-        try:
-            self._send_q.put_nowait(json.dumps(payload))
-        except queue.Full:
-            pass
-
-    def _reset_response_state(self) -> None:
-        self._response_active = False
-        self._speaking = False
-        self._current_item_id = None
-        self._current_content_index = 0
-        self._audio_bytes_in_response = 0
-        self._first_delta_t = None
-        self._audio_chunks = 0
-
-    # ---- session ----
-    def _on_open(self, ws: websocket.WebSocketApp) -> None:
-        print("[ws] connected", flush=True)
-        session: dict = {
-            "type": "realtime",
-            "output_modalities": ["audio"],
-            "instructions": INSTRUCTIONS,
-            "audio": {
-                "input": {
-                    "format": {"type": "audio/pcm", "rate": REALTIME_RATE},
-                    "transcription": {
-                        "model": "gpt-4o-mini-transcribe",
-                        "language": "fr",
-                    },
-                    "turn_detection": {
-                        "type": "server_vad",
-                        "threshold": 0.6,
-                        "prefix_padding_ms": 300,
-                        "silence_duration_ms": 700,
-                    },
-                },
-                "output": {
-                    "format": {"type": "audio/pcm", "rate": REALTIME_RATE},
-                    "voice": VOICE,
-                },
-            },
-            "tools": TOOLS,
-            "tool_choice": "auto",
-        }
-        if MODEL in REASONING_MODELS:
-            session["reasoning"] = {"effort": REASONING_EFFORT}
-        ws.send(json.dumps({"type": "session.update", "session": session}))
-        self.media.start_playing()
-        self.media.start_recording()
-        self._mic_thread = threading.Thread(target=self._mic_loop, daemon=True)
-        self._mic_thread.start()
-
-    # ---- mic -> openai ----
-    def _mic_loop(self) -> None:
-        while not self._stop.is_set():
-            samples = self.media.get_audio_sample()
-            if samples is None or len(samples) == 0:
-                time.sleep(0.01)
-                continue
-            mono = samples if samples.ndim == 1 else samples.mean(axis=1)
-            resampled = resample(mono.astype(np.float32), self.in_rate, REALTIME_RATE)
-            b64 = base64.b64encode(f32_to_pcm16_bytes(resampled)).decode("ascii")
-            self._send({"type": "input_audio_buffer.append", "audio": b64})
-
-    def _sender_loop(self) -> None:
-        while not self._stop.is_set():
-            try:
-                msg = self._send_q.get(timeout=0.1)
-            except queue.Empty:
-                continue
-            try:
-                self._ws.send(msg)  # type: ignore[union-attr]
-            except Exception as e:
-                print(f"[ws] send failed: {e}", flush=True)
-                return
-
-    # ---- barge-in ----
-    def _barge_in(self) -> None:
-        """User started speaking. Cancel in-flight response, truncate assistant
-        item to what was actually played, drop any pending emotion."""
-        if not self._response_active:
-            return
-        # estimate played ms: PCM16 mono @ 24kHz -> 48 bytes/ms
-        recv_ms = self._audio_bytes_in_response // 48
-        wall_ms = 0
-        if self._first_delta_t is not None:
-            wall_ms = int((time.monotonic() - self._first_delta_t) * 1000)
-        played_ms = min(recv_ms, wall_ms) if wall_ms > 0 else recv_ms
-
-        if self._current_item_id and played_ms > 0:
-            self._send({
-                "type": "conversation.item.truncate",
-                "item_id": self._current_item_id,
-                "content_index": self._current_content_index,
-                "audio_end_ms": played_ms,
-            })
-        self._send({"type": "response.cancel"})
-        self._pending_emotion = None
-        print(f"[barge-in] cut at {played_ms} ms", flush=True)
-
-    # ---- openai -> speaker / emotions ----
-    def _on_message(self, ws: websocket.WebSocketApp, raw: str) -> None:
-        evt = json.loads(raw)
-        t = evt.get("type", "")
-
-        if t in ("response.audio.delta", "response.output_audio.delta"):
-            self._audio_chunks += 1
-            if self._first_delta_t is None:
-                self._first_delta_t = time.monotonic()
-                self._speaking = True
-            if not self._current_item_id:
-                self._current_item_id = evt.get("item_id")
-                self._current_content_index = evt.get("content_index", 0)
-            try:
-                pcm_b64 = evt["delta"]
-                self._audio_bytes_in_response += (len(pcm_b64) * 3) // 4  # base64 -> raw bytes approx
-                self._play_audio_delta(pcm_b64)
-            except Exception as e:
-                print(f"[speaker] push failed: {e}", flush=True)
-
-        elif t == "input_audio_buffer.speech_started":
-            self._barge_in()
-
-        elif t == "input_audio_buffer.speech_stopped":
-            pass
-
-        elif t == "response.created":
-            self._reset_response_state()
-            self._response_active = True
-
-        elif t in ("response.audio_transcript.delta", "response.output_audio_transcript.delta"):
-            sys.stdout.write(evt.get("delta", ""))
-            sys.stdout.flush()
-
-        elif t == "conversation.item.input_audio_transcription.completed":
-            print(f"\n[user] {evt.get('transcript', '').strip()}", flush=True)
-
-        elif t in ("response.audio_transcript.done", "response.output_audio_transcript.done"):
-            print(flush=True)
-
-        elif t == "response.output_item.done":
-            # Single source of truth for tool calls — both
-            # response.function_call_arguments.done and this event fire for
-            # the same call, so we use only this one.
-            item = evt.get("item") or {}
-            if item.get("type") != "function_call":
-                return
-            self._handle_tool_call({
-                "name": item.get("name"),
-                "call_id": item.get("call_id"),
-                "arguments": item.get("arguments") or "{}",
-            })
-
-        elif t == "response.done":
-            rsp = evt.get("response") or {}
-            rsp_id = rsp.get("id")
-            if rsp_id and rsp_id == self._last_done_response_id:
-                return  # server occasionally re-sends response.done
-            self._last_done_response_id = rsp_id
-            usage = rsp.get("usage") or {}
-            cost, br = compute_cost(usage, MODEL)
-            self._cost_total += cost
-            self._turns += 1
-            print(
-                f"[bot] response.done audio_chunks={self._audio_chunks} "
-                f"in:{br['text_in']}t/{br['text_in_cached']}c/{br['audio_in']}a/{br['audio_in_cached']}ac "
-                f"out:{br['text_out']}t/{br['audio_out']}a "
-                f"cost=${cost:.4f} cumul=${self._cost_total:.4f} (turn #{self._turns})",
-                flush=True,
-            )
-            # Emotion deferred from a tool call during speech
-            if self._pending_emotion:
-                self.emotions.play(self._pending_emotion, min_interval=0.0)
-                self._pending_emotion = None
-            needs_followup = self._needs_followup_response
-            self._needs_followup_response = False
-            self._reset_response_state()
-            if needs_followup:
-                # Now that the previous response is fully done, ask the model
-                # to react to the tool output(s).
-                self._send({"type": "response.create"})
-
-        elif t == "error":
-            err = evt.get("error") or {}
-            code = err.get("code")
-            # Benign races: cancel arrives after the response naturally ends,
-            # or follow-up response.create races with response.done.
-            if code in ("response_cancel_not_active",
-                        "conversation_already_has_active_response"):
-                return
-            print(f"[ws] error: {err}", flush=True)
-
-    def _play_audio_delta(self, b64_audio: str) -> None:
-        pcm = pcm16_bytes_to_f32(base64.b64decode(b64_audio))
-        out = resample(pcm, REALTIME_RATE, self.out_rate)
-        self.media.push_audio_sample(out)
-
-    def _run_move_async(self, fn) -> None:
-        """Run a movement off the WS thread. If a previous one is still
-        running, wait for it (so sequences don't trample each other)."""
-        prev = self._move_thread
-
-        def _wrapper() -> None:
-            if prev is not None and prev.is_alive():
-                prev.join(timeout=10.0)
-            try:
-                fn()
-            except Exception as e:
-                print(f"[move] failed: {e}", flush=True)
-
-        t = threading.Thread(target=_wrapper, daemon=True)
-        self._move_thread = t
-        t.start()
-
-    def _play_sequence(self, steps: list) -> None:
-        """Execute a planned head choreography. Each step has rotation
-        (yaw/pitch/roll deg), translation (x/y/z mm), optional antennas
-        (deg), and a duration (s). All fields are optional except duration."""
-        for step in steps:
-            try:
-                roll = max(-30.0, min(30.0, float(step.get("roll", 0.0))))
-                pitch = max(-30.0, min(30.0, float(step.get("pitch", 0.0))))
-                yaw = max(-60.0, min(60.0, float(step.get("yaw", 0.0))))
-                x_mm = max(-30.0, min(30.0, float(step.get("x", 0.0))))
-                y_mm = max(-30.0, min(30.0, float(step.get("y", 0.0))))
-                z_mm = max(-30.0, min(30.0, float(step.get("z", 0.0))))
-                duration = max(0.1, min(3.0, float(step.get("duration", 0.4))))
-                pose = _make_head_pose(roll, pitch, yaw, x_mm, y_mm, z_mm)
-
-                antennas = None
-                al = step.get("antenna_left")
-                ar = step.get("antenna_right")
-                if al is not None or ar is not None:
-                    al_rad = np.deg2rad(max(-90.0, min(90.0, float(al or 0.0))))
-                    ar_rad = np.deg2rad(max(-90.0, min(90.0, float(ar or 0.0))))
-                    antennas = [al_rad, ar_rad]
-
-                self.mini.goto_target(pose, antennas=antennas, duration=duration)
-            except Exception as e:
-                print(f"[seq] step failed: {e}", flush=True)
-                return
-        # back to neutral
-        try:
-            self.mini.goto_target(
-                INIT_HEAD_POSE,
-                antennas=INIT_ANTENNAS_JOINT_POSITIONS,
-                duration=0.5,
-            )
-        except Exception:
-            pass
-
-    def _handle_tool_call(self, evt: dict) -> None:
-        name = evt.get("name")
-        call_id = evt.get("call_id")
-        args_raw = evt.get("arguments") or "{}"
-        try:
-            args = json.loads(args_raw)
-        except json.JSONDecodeError:
-            args = {}
-        print(f"[tool] {name}({args})", flush=True)
-
-        if name == "play_emotion":
-            emo = args.get("name", "")
-            if self._speaking:
-                # defer to end of turn so it doesn't talk over the voice
-                self._pending_emotion = emo
-                result = f"queued:{emo}"
-            else:
-                played = self.emotions.play(emo, min_interval=0.0)
-                result = f"played:{emo}" if played else f"skipped:{emo}"
-        elif name == "look":
-            direction = args.get("direction", "center")
-            pose = LOOK_POSES.get(direction)
-            if pose is None:
-                result = f"unknown_direction:{direction}"
-            else:
-                self._run_move_async(lambda: self.mini.goto_target(pose, duration=0.6))
-                result = f"looking:{direction}"
-        elif name == "move_sequence":
-            steps = args.get("steps") or []
-            if not steps:
-                result = "empty_sequence"
-            else:
-                self._run_move_async(lambda: self._play_sequence(steps))
-                result = f"playing:{len(steps)}_steps"
-        else:
-            result = f"unknown_tool:{name}"
-
-        self._send({
-            "type": "conversation.item.create",
-            "item": {
-                "type": "function_call_output",
-                "call_id": call_id,
-                "output": json.dumps({"status": result}),
-            },
-        })
-        # Defer response.create to response.done — sending it now while the
-        # current response is still active triggers
-        # `conversation_already_has_active_response`.
-        self._needs_followup_response = True
-
-    # ---- lifecycle ----
-    def _on_error(self, ws: websocket.WebSocketApp, err: Exception) -> None:
-        print(f"[ws] error: {err}", flush=True)
-
-    def _on_close(self, ws, code, msg) -> None:
-        print(f"[ws] closed code={code} msg={msg}", flush=True)
-        print(f"[cost] session total: ${self._cost_total:.4f} over {self._turns} turn(s)", flush=True)
-        self._stop.set()
-
-    def run(self) -> None:
-        if not OPENAI_API_KEY:
-            sys.exit("OPENAI_API_KEY is not set")
-
-        p = PRICING.get(MODEL)
-        reasoning_str = (
-            f" reasoning.effort={REASONING_EFFORT}"
-            if MODEL in REASONING_MODELS else " (no reasoning support)"
-        )
-        if p is None:
-            print(
-                f"[config] model={MODEL} voice={VOICE}{reasoning_str}"
-                " (pricing UNKNOWN — cost will be 0)",
-                flush=True,
-            )
-        else:
-            print(
-                f"[config] model={MODEL} voice={VOICE}{reasoning_str}  "
-                f"prices /1M tok: text in ${p['text_input']*1e6:.2f} "
-                f"(cached ${p['text_input_cached']*1e6:.2f}) "
-                f"text out ${p['text_output']*1e6:.2f}  "
-                f"audio in ${p['audio_input']*1e6:.2f} "
-                f"(cached ${p['audio_input_cached']*1e6:.2f}) "
-                f"audio out ${p['audio_output']*1e6:.2f}",
-                flush=True,
-            )
-
-        headers = [f"Authorization: Bearer {OPENAI_API_KEY}"]
-        self._ws = websocket.WebSocketApp(
-            REALTIME_URL,
-            header=headers,
-            on_open=self._on_open,
-            on_message=self._on_message,
-            on_error=self._on_error,
-            on_close=self._on_close,
-        )
-        self._sender_thread = threading.Thread(target=self._sender_loop, daemon=True)
-        self._sender_thread.start()
-
-        def _sigint(_sig, _frm):
-            self._stop.set()
-            try:
-                self._ws.close()
-            except Exception:
-                pass
-
-        signal.signal(signal.SIGINT, _sigint)
-
-        try:
-            self._ws.run_forever()
-        finally:
-            self._stop.set()
-            try:
-                self.media.stop_recording()
-            except Exception:
-                pass
-            try:
-                self.media.stop_playing()
-            except Exception:
-                pass
+# Helper to create bridge based on provider
+def create_bridge(mini: ReachyMini, provider: str = PROVIDER, 
+                   model: str = MODEL, voice: str = VOICE) -> VoiceBridge:
+    """Factory function to create the appropriate bridge based on provider."""
+    if provider == "openai":
+        return OpenAIRealtimeBridge(mini, model=model, voice=voice)
+    elif provider == "xai":
+        return GrokVoiceBridge(mini, model=model, voice=voice)
+    else:
+        sys.exit(f"Unknown provider: {provider}")
 
 
 def main() -> None:
@@ -817,13 +105,15 @@ def main() -> None:
     if REACHY_HOST:
         kwargs["host"] = REACHY_HOST
         kwargs["port"] = REACHY_PORT
+    
     with ReachyMini(**kwargs) as mini:
         try:
             mini.wake_up()
         except Exception as e:
             print(f"[robot] wake_up skipped: {e}", flush=True)
         try:
-            RealtimeBridge(mini).run()
+            bridge = create_bridge(mini, provider=PROVIDER, model=MODEL, voice=VOICE)
+            bridge.run()
         finally:
             # Return to neutral pose (do NOT goto_sleep — user wants the
             # robot to stay awake / powered on).
