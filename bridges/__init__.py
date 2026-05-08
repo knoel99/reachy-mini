@@ -1,9 +1,10 @@
 """Voice API bridges for Reachy Mini.
 
-This package contains implementations for different voice API providers:
-- VoiceBridge: Abstract base class
-- OpenAIRealtimeBridge: OpenAI Realtime API implementation
-- GrokVoiceBridge: xAI Grok Voice Think Fast implementation
+Implementations for different voice API providers, all configured for
+text-only output (no TTS — the robot reacts via tool calls only):
+- VoiceBridge: abstract base class
+- OpenAIRealtimeBridge: OpenAI Realtime API
+- GrokVoiceBridge: xAI Grok Voice Think Fast
 """
 
 from .voice_bridge import (
@@ -13,11 +14,10 @@ from .voice_bridge import (
     _make_head_pose,
     REALTIME_RATE,
     INSTRUCTIONS,
-    EMOTION_NAMES,
-    TOOLS,
+    build_tools,
 )
-from .openai_bridge import OpenAIRealtimeBridge, OPENAI_VOICES
-from .grok_bridge import GrokVoiceBridge, GROK_VOICES
+from .openai_bridge import OpenAIRealtimeBridge
+from .grok_bridge import GrokVoiceBridge
 
 __all__ = [
     "VoiceBridge",
@@ -26,10 +26,7 @@ __all__ = [
     "_make_head_pose",
     "REALTIME_RATE",
     "INSTRUCTIONS",
-    "EMOTION_NAMES",
-    "TOOLS",
+    "build_tools",
     "OpenAIRealtimeBridge",
-    "OPENAI_VOICES",
     "GrokVoiceBridge",
-    "GROK_VOICES",
 ]

@@ -46,13 +46,6 @@ def _parse_args() -> argparse.Namespace:
              "OpenAI: gpt-realtime-mini, gpt-realtime, gpt-realtime-2; "
              "xAI: grok-voice-think-fast-1.0.",
     )
-    p.add_argument(
-        "--voice",
-        default=None,
-        help="Override voice. "
-             "OpenAI: alloy, ash, ballad, coral, echo, sage, shimmer, verse, marin, cedar; "
-             "xAI: eve, ara, rex, sal, leo.",
-    )
     return p.parse_args()
 
 
@@ -62,10 +55,8 @@ PROVIDER = _ARGS.provider or os.environ.get("VOICE_PROVIDER", "openai")
 # Provider-specific defaults
 if PROVIDER == "openai":
     MODEL = _ARGS.model or os.environ.get("OPENAI_REALTIME_MODEL", "gpt-realtime-mini")
-    VOICE = _ARGS.voice or os.environ.get("OPENAI_REALTIME_VOICE", "alloy")
 elif PROVIDER == "xai":
     MODEL = _ARGS.model or os.environ.get("GROK_MODEL", "grok-voice-think-fast-1.0")
-    VOICE = _ARGS.voice or os.environ.get("GROK_VOICE", "eve")
 else:
     sys.exit(f"Unknown provider: {PROVIDER}")
 
@@ -89,13 +80,13 @@ if REACHY_HOST:
 REALTIME_RATE = 24_000
 
 # Helper to create bridge based on provider
-def create_bridge(mini: ReachyMini, provider: str = PROVIDER, 
-                   model: str = MODEL, voice: str = VOICE) -> VoiceBridge:
+def create_bridge(mini: ReachyMini, provider: str = PROVIDER,
+                  model: str = MODEL) -> VoiceBridge:
     """Factory function to create the appropriate bridge based on provider."""
     if provider == "openai":
-        return OpenAIRealtimeBridge(mini, model=model, voice=voice)
+        return OpenAIRealtimeBridge(mini, model=model)
     elif provider == "xai":
-        return GrokVoiceBridge(mini, model=model, voice=voice)
+        return GrokVoiceBridge(mini, model=model)
     else:
         sys.exit(f"Unknown provider: {provider}")
 
@@ -105,14 +96,14 @@ def main() -> None:
     if REACHY_HOST:
         kwargs["host"] = REACHY_HOST
         kwargs["port"] = REACHY_PORT
-    
+
     with ReachyMini(**kwargs) as mini:
         try:
             mini.wake_up()
         except Exception as e:
             print(f"[robot] wake_up skipped: {e}", flush=True)
         try:
-            bridge = create_bridge(mini, provider=PROVIDER, model=MODEL, voice=VOICE)
+            bridge = create_bridge(mini, provider=PROVIDER, model=MODEL)
             bridge.run()
         finally:
             # Return to neutral pose (do NOT goto_sleep — user wants the

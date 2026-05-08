@@ -1,20 +1,15 @@
 """OpenAI Realtime API bridge implementation."""
 
-import base64
+from __future__ import annotations
+
 import os
 import sys
 from typing import TYPE_CHECKING
-
-import numpy as np
 
 from .voice_bridge import (
     VoiceBridge,
     REALTIME_RATE,
     INSTRUCTIONS,
-    EMOTION_NAMES,
-    LOOK_POSES,
-    TOOLS,
-    _make_head_pose,
 )
 
 if TYPE_CHECKING:
@@ -22,9 +17,6 @@ if TYPE_CHECKING:
 
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-
-# OpenAI voices (GA)
-OPENAI_VOICES = ["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"]
 
 PRICING = {
     "gpt-realtime-mini": {
@@ -57,17 +49,12 @@ REASONING_MODELS = {"gpt-realtime", "gpt-realtime-2"}
 REASONING_EFFORT = os.environ.get("OPENAI_REASONING_EFFORT", "medium")
 
 class OpenAIRealtimeBridge(VoiceBridge):
-    """OpenAI Realtime API implementation."""
-    
-    def __init__(self, mini: ReachyMini, model: str = "gpt-realtime-mini", 
-                 voice: str = "alloy") -> None:
+    """OpenAI Realtime API implementation. Text-only output (no TTS)."""
+
+    def __init__(self, mini: ReachyMini, model: str = "gpt-realtime-mini") -> None:
         if model not in PRICING:
             raise ValueError(f"Unsupported OpenAI model: {model}. Available: {list(PRICING.keys())}")
-        if voice not in OPENAI_VOICES:
-            raise ValueError(f"Unsupported OpenAI voice: {voice}. Available: {OPENAI_VOICES}")
-        
         self.model = model
-        self.voice = voice
         super().__init__(mini)
     
     def get_ws_url(self) -> str:
@@ -79,9 +66,12 @@ class OpenAIRealtimeBridge(VoiceBridge):
         return f"Authorization: Bearer {OPENAI_API_KEY}"
     
     def get_session_config(self) -> dict:
+        # Text-only output: the robot reacts via tool calls (movements +
+        # emotion sounds) and never speaks through the API. This avoids
+        # paying for audio output tokens and removes the TTS latency.
         session = {
             "type": "realtime",
-            "output_modalities": ["audio"],
+            "output_modalities": ["text"],
             "instructions": INSTRUCTIONS,
             "audio": {
                 "input": {
@@ -97,36 +87,21 @@ class OpenAIRealtimeBridge(VoiceBridge):
                         "silence_duration_ms": 700,
                     },
                 },
-                "output": {
-                    "format": {"type": "audio/pcm", "rate": REALTIME_RATE},
-                    "voice": self.voice,
-                },
             },
-            "tools": TOOLS,
+            "tools": self.tools,
             "tool_choice": "auto",
         }
         if self.model in REASONING_MODELS:
             session["reasoning"] = {"effort": REASONING_EFFORT}
         return session
-    
-    def handle_audio_delta(self, evt: dict) -> None:
-        delta = evt.get("delta")
-        if not delta:
-            return
-        pcm = self.pcm16_bytes_to_f32(base64.b64decode(delta))
-        out = self.resample(pcm, REALTIME_RATE, self.out_rate)
-        self.media.push_audio_sample(out)
-    
+
     def handle_transcript_delta(self, evt: dict) -> None:
         sys.stdout.write(evt.get("delta", ""))
         sys.stdout.flush()
     
     def handle_input_transcription(self, evt: dict) -> None:
         print(f"\n[user] {evt.get('transcript', '').strip()}", flush=True)
-    
-    def supports_truncate(self) -> bool:
-        return True
-    
+
     def compute_cost(self, usage: dict) -> tuple[float, dict]:
         p = PRICING.get(self.model) or PRICING["gpt-realtime-mini"]
         inp = usage.get("input_token_details") or {}
@@ -157,9 +132,6 @@ class OpenAIRealtimeBridge(VoiceBridge):
             "text_out": text_out, "audio_out": audio_out,
         }
     
-    def get_tools(self) -> list[dict]:
-        return TOOLS
-    
     def _print_config(self) -> None:
         p = PRICING.get(self.model)
         reasoning_str = (
@@ -168,18 +140,17 @@ class OpenAIRealtimeBridge(VoiceBridge):
         )
         if p is None:
             print(
-                f"[config] provider=openai model={self.model} voice={self.voice}{reasoning_str}"
-                " (pricing UNKNOWN — cost will be 0)",
+                f"[config] provider=openai model={self.model}{reasoning_str} "
+                "text-only output (pricing UNKNOWN — cost will be 0)",
                 flush=True,
             )
         else:
             print(
-                f"[config] provider=openai model={self.model} voice={self.voice}{reasoning_str}  "
+                f"[config] provider=openai model={self.model}{reasoning_str} text-only output  "
                 f"prices /1M tok: text in ${p['text_input']*1e6:.2f} "
                 f"(cached ${p['text_input_cached']*1e6:.2f}) "
                 f"text out ${p['text_output']*1e6:.2f}  "
                 f"audio in ${p['audio_input']*1e6:.2f} "
-                f"(cached ${p['audio_input_cached']*1e6:.2f}) "
-                f"audio out ${p['audio_output']*1e6:.2f}",
+                f"(cached ${p['audio_input_cached']*1e6:.2f})",
                 flush=True,
             )
