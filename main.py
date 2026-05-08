@@ -164,7 +164,13 @@ même si l'utilisateur s'adresse à toi dans une autre langue.
 
 # Contexte du corps
 Tu disposes :
-- d'une tête articulée (yaw ±60°, pitch ±30°, roll ±30°),
+- d'une tête articulée. Elle a SIX degrés de liberté :
+    * rotations : yaw ±60°, pitch ±30°, roll ±30°
+    * translations : x ±30 mm (avant/arrière), y ±30 mm (gauche/droite),
+      z ±30 mm (haut/bas — fait littéralement MONTER ou descendre la tête)
+  ATTENTION : `pitch` ≠ `z`. Pitch lève le MENTON. Z élève toute la tête.
+  Si l'utilisateur dit « monte la tête », « élève la tête » ou « tête en
+  hauteur », c'est `z` positif, PAS pitch.
 - de deux antennes mobiles,
 - d'une bibliothèque d'émotions préenregistrées.
 
@@ -217,11 +223,15 @@ EMOTION_NAMES = [
 ]
 
 def _make_head_pose(roll_deg: float = 0.0, pitch_deg: float = 0.0,
-                    yaw_deg: float = 0.0) -> np.ndarray:
+                    yaw_deg: float = 0.0,
+                    x_mm: float = 0.0, y_mm: float = 0.0,
+                    z_mm: float = 0.0) -> np.ndarray:
     pose = np.eye(4)
     pose[:3, :3] = R.from_euler(
         "xyz", [roll_deg, pitch_deg, yaw_deg], degrees=True
     ).as_matrix()
+    # SDK uses meters for translation (4x4 homogeneous matrix).
+    pose[:3, 3] = [x_mm / 1000.0, y_mm / 1000.0, z_mm / 1000.0]
     return pose
 
 
@@ -313,11 +323,17 @@ TOOLS = [
                         "type": "object",
                         "properties": {
                             "yaw":   {"type": "number",
-                                      "description": "Yaw en degrés (-60..60). Positif=gauche, négatif=droite."},
+                                      "description": "Rotation yaw en degrés (-60..60). Positif=gauche, négatif=droite."},
                             "pitch": {"type": "number",
-                                      "description": "Pitch en degrés (-30..30). Positif=bas, négatif=haut."},
+                                      "description": "Rotation pitch en degrés (-30..30). Positif=bas, négatif=haut (lève le menton). N'est PAS le fait d'élever physiquement la tête — pour ça, utiliser z."},
                             "roll":  {"type": "number",
-                                      "description": "Roll (penché côté) en degrés (-30..30)."},
+                                      "description": "Rotation roll (penché côté) en degrés (-30..30)."},
+                            "x":     {"type": "number",
+                                      "description": "Translation X en millimètres (-30..30). Positif=avant. Sert à pencher la tête en avant."},
+                            "y":     {"type": "number",
+                                      "description": "Translation Y en millimètres (-30..30). Positif=gauche."},
+                            "z":     {"type": "number",
+                                      "description": "Translation Z en millimètres (-30..30). Positif=HAUT — fait MONTER la tête physiquement (le buste de la tête monte). C'est différent du pitch (qui ne fait que lever le menton)."},
                             "antenna_left":  {"type": "number",
                                               "description": "Antenne gauche en degrés (-90..90). Optionnel."},
                             "antenna_right": {"type": "number",
@@ -639,19 +655,19 @@ class RealtimeBridge:
         t.start()
 
     def _play_sequence(self, steps: list) -> None:
-        """Execute a planned head choreography. Each step has yaw/pitch/roll
-        in degrees, optional antenna_left/right in degrees, and a duration."""
+        """Execute a planned head choreography. Each step has rotation
+        (yaw/pitch/roll deg), translation (x/y/z mm), optional antennas
+        (deg), and a duration (s). All fields are optional except duration."""
         for step in steps:
             try:
-                roll = float(step.get("roll", 0.0))
-                pitch = float(step.get("pitch", 0.0))
-                yaw = float(step.get("yaw", 0.0))
-                # clamp to safe ranges
-                roll = max(-30.0, min(30.0, roll))
-                pitch = max(-30.0, min(30.0, pitch))
-                yaw = max(-60.0, min(60.0, yaw))
+                roll = max(-30.0, min(30.0, float(step.get("roll", 0.0))))
+                pitch = max(-30.0, min(30.0, float(step.get("pitch", 0.0))))
+                yaw = max(-60.0, min(60.0, float(step.get("yaw", 0.0))))
+                x_mm = max(-30.0, min(30.0, float(step.get("x", 0.0))))
+                y_mm = max(-30.0, min(30.0, float(step.get("y", 0.0))))
+                z_mm = max(-30.0, min(30.0, float(step.get("z", 0.0))))
                 duration = max(0.1, min(3.0, float(step.get("duration", 0.4))))
-                pose = _make_head_pose(roll, pitch, yaw)
+                pose = _make_head_pose(roll, pitch, yaw, x_mm, y_mm, z_mm)
 
                 antennas = None
                 al = step.get("antenna_left")
