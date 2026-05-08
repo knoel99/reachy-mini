@@ -29,6 +29,7 @@ import time
 import numpy as np
 import websocket
 from scipy.signal import resample_poly
+from scipy.spatial.transform import Rotation as R
 
 from reachy_mini import ReachyMini
 from reachy_mini.io.ws_client import WSClient
@@ -112,16 +113,27 @@ def compute_cost(usage: dict, model: str) -> tuple[float, dict]:
     }
 
 
-INSTRUCTIONS = (
-    "Tu es la voix d'un petit robot Reachy Mini. "
-    "Tu DOIS toujours répondre EN FRANÇAIS, jamais dans une autre langue, "
-    "même si l'utilisateur parle dans une autre langue. "
-    "Réponds vocalement à chaque tour, de manière brève (1 à 2 phrases), "
-    "chaleureuse et expressive. "
-    "Quand une émotion est naturelle (joie, surprise, curiosité, doute…), "
-    "appelle l'outil `play_emotion` avec le nom approprié. L'émotion sera "
-    "jouée à la fin de ton tour pour ne pas couvrir ta voix."
-)
+INSTRUCTIONS = """Tu es la voix d'un petit robot Reachy Mini.
+
+LANGUE : Tu DOIS toujours répondre EN FRANÇAIS, jamais dans une autre langue,
+même si l'utilisateur parle dans une autre langue.
+
+STYLE : Réponds vocalement à chaque tour, de manière brève (1 à 2 phrases),
+chaleureuse et expressive.
+
+OUTILS - règles ABSOLUES :
+- Tu as un corps physique. Tu peux bouger ta tête et exprimer des émotions
+  via DEUX outils : `play_emotion` et `look`.
+- Quand l'utilisateur te demande de regarder ou tourner quelque part
+  (gauche, droite, haut, bas, devant), appelle `look(direction)`. Ne
+  réponds JAMAIS « je ne peux pas bouger » — tu peux.
+- Quand une émotion renforce naturellement ta réponse (joie, surprise,
+  curiosité, doute, etc.), appelle `play_emotion(name)` en plus de parler.
+- N'ÉCRIS ET NE PRONONCE JAMAIS « play_emotion » NI « look » dans ta
+  réponse audio. Les outils s'utilisent UNIQUEMENT via le mécanisme de
+  function-calling de l'API, jamais en texte. Si tu vois ces mots dans
+  ton transcript c'est une ERREUR.
+"""
 
 EMOTION_NAMES = [
     "amazed1", "anxiety1", "attentive1", "attentive2", "calming1",
@@ -133,27 +145,68 @@ EMOTION_NAMES = [
     "understanding1", "welcoming1", "yes1",
 ]
 
-TOOLS = [{
-    "type": "function",
-    "name": "play_emotion",
-    "description": (
-        "Joue une émotion physique sur le robot Reachy Mini "
-        "(mouvements de tête + antennes). À utiliser quand une émotion "
-        "renforce naturellement la réponse. L'émotion sera jouée à la "
-        "fin du tour de parole."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "name": {
-                "type": "string",
-                "description": "Nom de l'émotion à jouer.",
-                "enum": EMOTION_NAMES,
+def _make_head_pose(roll_deg: float = 0.0, pitch_deg: float = 0.0,
+                    yaw_deg: float = 0.0) -> np.ndarray:
+    pose = np.eye(4)
+    pose[:3, :3] = R.from_euler(
+        "xyz", [roll_deg, pitch_deg, yaw_deg], degrees=True
+    ).as_matrix()
+    return pose
+
+
+# Head poses for the `look` tool. Yaw = around vertical axis.
+LOOK_POSES = {
+    "center": _make_head_pose(),
+    "left":   _make_head_pose(yaw_deg=30),
+    "right":  _make_head_pose(yaw_deg=-30),
+    "up":     _make_head_pose(pitch_deg=-20),
+    "down":   _make_head_pose(pitch_deg=20),
+}
+
+
+TOOLS = [
+    {
+        "type": "function",
+        "name": "play_emotion",
+        "description": (
+            "Joue une émotion physique sur le robot Reachy Mini "
+            "(mouvements de tête + antennes). À utiliser quand une émotion "
+            "renforce naturellement la réponse. L'émotion est jouée à la "
+            "fin du tour de parole pour ne pas couvrir la voix."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Nom de l'émotion à jouer.",
+                    "enum": EMOTION_NAMES,
+                },
             },
+            "required": ["name"],
         },
-        "required": ["name"],
     },
-}]
+    {
+        "type": "function",
+        "name": "look",
+        "description": (
+            "Tourne la tête de Reachy Mini dans une direction. À appeler "
+            "dès que l'utilisateur demande de regarder, tourner, ou "
+            "pencher la tête quelque part."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "direction": {
+                    "type": "string",
+                    "description": "Direction où regarder.",
+                    "enum": list(LOOK_POSES.keys()),
+                },
+            },
+            "required": ["direction"],
+        },
+    },
+]
 
 
 def f32_to_pcm16_bytes(samples: np.ndarray) -> bytes:
@@ -443,6 +496,7 @@ class RealtimeBridge:
             args = json.loads(args_raw)
         except json.JSONDecodeError:
             args = {}
+        print(f"[tool] {name}({args})", flush=True)
 
         if name == "play_emotion":
             emo = args.get("name", "")
@@ -453,6 +507,20 @@ class RealtimeBridge:
             else:
                 played = self.emotions.play(emo, min_interval=0.0)
                 result = f"played:{emo}" if played else f"skipped:{emo}"
+        elif name == "look":
+            direction = args.get("direction", "center")
+            pose = LOOK_POSES.get(direction)
+            if pose is None:
+                result = f"unknown_direction:{direction}"
+            else:
+                # head movement is silent → run concurrently with speech
+                def _run_look() -> None:
+                    try:
+                        self.mini.goto_target(pose, duration=0.6)
+                    except Exception as e:
+                        print(f"[look] failed: {e}", flush=True)
+                threading.Thread(target=_run_look, daemon=True).start()
+                result = f"looking:{direction}"
         else:
             result = f"unknown_tool:{name}"
 
