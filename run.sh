@@ -17,4 +17,12 @@ export GST_PLUGIN_PATH=/opt/gst-plugins-rs/lib/x86_64-linux-gnu:${GST_PLUGIN_PAT
 export LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libstdc++.so.6:/usr/lib/x86_64-linux-gnu/libgcc_s.so.1${LD_PRELOAD:+:$LD_PRELOAD}"
 set -a; source .env; set +a
 
-exec python -u main.py
+# Shorthand: `./run.sh mini` or `./run.sh full` overrides the model
+# without touching .env. Any other args are forwarded to main.py.
+EXTRA=()
+case "${1:-}" in
+  mini) EXTRA+=(--model gpt-realtime-mini); shift ;;
+  full) EXTRA+=(--model gpt-realtime);      shift ;;
+esac
+
+exec python -u main.py "${EXTRA[@]}" "$@"

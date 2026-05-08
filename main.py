@@ -17,6 +17,7 @@ Conversation flow tuned for naturalness:
 
 from __future__ import annotations
 
+import argparse
 import base64
 import json
 import os
@@ -38,8 +39,29 @@ from reachy_mini.reachy_mini import INIT_HEAD_POSE, INIT_ANTENNAS_JOINT_POSITION
 
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-MODEL = os.environ.get("OPENAI_REALTIME_MODEL", "gpt-realtime-mini")
-VOICE = os.environ.get("OPENAI_REALTIME_VOICE", "alloy")
+
+
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Reachy Mini <-> OpenAI Realtime bridge")
+    p.add_argument(
+        "--model",
+        default=None,
+        help="Override OPENAI_REALTIME_MODEL. Examples: "
+             "gpt-realtime-mini (default, cheaper) or gpt-realtime (full, "
+             "better at planning/tool use).",
+    )
+    p.add_argument(
+        "--voice",
+        default=None,
+        help="Override OPENAI_REALTIME_VOICE. GA voices: alloy, ash, ballad, "
+             "coral, echo, sage, shimmer, verse, marin, cedar.",
+    )
+    return p.parse_args()
+
+
+_ARGS = _parse_args()
+MODEL = _ARGS.model or os.environ.get("OPENAI_REALTIME_MODEL", "gpt-realtime-mini")
+VOICE = _ARGS.voice or os.environ.get("OPENAI_REALTIME_VOICE", "alloy")
 
 REACHY_HOST = os.environ.get("REACHY_HOST")
 REACHY_PORT = int(os.environ.get("REACHY_PORT", "8000"))
@@ -663,6 +685,21 @@ class RealtimeBridge:
     def run(self) -> None:
         if not OPENAI_API_KEY:
             sys.exit("OPENAI_API_KEY is not set")
+
+        p = PRICING.get(MODEL)
+        if p is None:
+            print(f"[config] model={MODEL} voice={VOICE} (pricing UNKNOWN — cost will be 0)", flush=True)
+        else:
+            print(
+                f"[config] model={MODEL} voice={VOICE}  "
+                f"prices /1M tok: text in ${p['text_input']*1e6:.2f} "
+                f"(cached ${p['text_input_cached']*1e6:.2f}) "
+                f"text out ${p['text_output']*1e6:.2f}  "
+                f"audio in ${p['audio_input']*1e6:.2f} "
+                f"(cached ${p['audio_input_cached']*1e6:.2f}) "
+                f"audio out ${p['audio_output']*1e6:.2f}",
+                flush=True,
+            )
 
         headers = [f"Authorization: Bearer {OPENAI_API_KEY}"]
         self._ws = websocket.WebSocketApp(
