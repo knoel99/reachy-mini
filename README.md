@@ -26,14 +26,44 @@ reachy-mini/
     ├── __main__.py             # entrypoint : python -m reachy_voice
     ├── tools.py                # INSTRUCTIONS, LOOK_POSES, build_tools
     ├── emotions.py             # EmotionPlayer (preload + push_audio_sample)
-    └── bridges/
-        ├── base.py             # VoiceBridge abstraite
-        ├── openai.py           # OpenAIRealtimeBridge
-        └── grok.py             # GrokVoiceBridge
+    ├── bridges/                # Voice WebSocket bridges
+    │   ├── base.py             # VoiceBridge abstraite (mic, tools, vision)
+    │   ├── openai.py           # OpenAIRealtimeBridge
+    │   └── grok.py             # GrokVoiceBridge
+    └── vision/                 # optional image-to-text backends
+        ├── base.py             # VisionBackend ABC + dataclasses
+        ├── moondream.py        # Moondream cloud / local SDK
+        ├── fastvlm.py          # FastVLM-7B HTTP client (Colab server)
+        ├── camera_worker.py    # latest-frame buffer thread
+        └── factory.py          # VISION_BACKEND env-driven dispatch
 ```
 
+Notebook compagnon : `colab/fastvlm_7b_server.ipynb` — sert FastVLM-7B
+sur Colab via gradio `share=True`. Colle l'URL publique dans
+`FASTVLM_URL` et l'agent l'utilise comme backend distant.
+
 Installation : `pip install -e .` (voir [INSTALL.md](./INSTALL.md)).
+Pour la vision : `pip install -e '.[vision]'` (Moondream + FastVLM).
 Lancement : `./run.sh` ou `python -m reachy_voice` ou `reachy-voice`.
+
+### Activer la vision
+
+Copie `.env.example` vers `.env` puis :
+
+```bash
+# Option A — Moondream cloud (recommandé pour démarrer)
+VISION_BACKEND=moondream
+MOONDREAM_API_KEY=...    # https://moondream.ai/c/account/api-keys
+
+# Option B — FastVLM-7B sur Colab
+VISION_BACKEND=fastvlm
+FASTVLM_URL=https://xxxx.gradio.live
+```
+
+Deux nouveaux outils sont alors exposés au LLM :
+- `look_and_describe(question)` — capture une frame et pose une question
+- `find_object(target)` — localise un objet et oriente la tête
+  (Moondream uniquement — utilise `point()`/`detect()` natifs)
 
 ## Architecture et flux de l'application
 

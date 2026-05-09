@@ -15,7 +15,13 @@ dependencies = [
     "websocket-client",
     "numpy",
     "scipy>=1.11.0",
+    "Pillow>=10.0",
 ]
+
+[project.optional-dependencies]
+moondream = ["moondream>=0.1.0"]
+fastvlm = ["httpx>=0.27"]
+vision = ["moondream>=0.1.0", "httpx>=0.27"]
 
 [project.scripts]
 reachy-voice = "reachy_voice.__main__:main"

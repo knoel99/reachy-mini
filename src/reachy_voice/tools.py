@@ -61,6 +61,32 @@ Tu as TROIS outils :
 """
 
 
+VISION_INSTRUCTIONS_QUERY = """
+# Vision (caméra frontale)
+Tu disposes d'une caméra grand-angle entre les yeux. Pour TOUTE
+question visuelle (couleur, objet présent, lecture de texte, scène),
+appelle `look_and_describe(question)`. Pose une question PRÉCISE et
+courte ; le retour est un texte bref que tu utilises ensuite pour
+réagir avec une émotion ou un mouvement (ex. tu vois quelque chose de
+drôle → `play_emotion('laugh1')`).
+"""
+
+VISION_INSTRUCTIONS_GROUNDING = """
+Pour « regarde le X » ou « où est le X », utilise `find_object(target)`
+qui localise l'objet ET tourne automatiquement la tête vers lui. Tu
+n'as pas besoin d'appeler `look` ensuite.
+"""
+
+
+def build_instructions(*, vision_enabled: bool = False, vision_grounding: bool = False) -> str:
+    parts = [INSTRUCTIONS]
+    if vision_enabled:
+        parts.append(VISION_INSTRUCTIONS_QUERY)
+    if vision_grounding:
+        parts.append(VISION_INSTRUCTIONS_GROUNDING)
+    return "".join(parts)
+
+
 def _make_head_pose(roll_deg: float = 0.0, pitch_deg: float = 0.0,
                     yaw_deg: float = 0.0,
                     x_mm: float = 0.0, y_mm: float = 0.0,
@@ -102,6 +128,62 @@ _LOOK_TOOL = {
             },
         },
         "required": ["direction"],
+    },
+}
+
+
+_LOOK_AND_DESCRIBE_TOOL = {
+    "type": "function",
+    "name": "look_and_describe",
+    "description": (
+        "Capture une image avec la caméra frontale et pose une question "
+        "dessus à un modèle de vision. À utiliser quand l'utilisateur "
+        "demande ce que voit le robot, la couleur d'un objet, qui est "
+        "présent, ce qui est écrit sur quelque chose, etc. Renvoie une "
+        "réponse en texte court — utilise-la ensuite pour réagir avec "
+        "play_emotion / look / move_sequence."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "question": {
+                "type": "string",
+                "description": (
+                    "Question précise à poser sur l'image. Exemples : "
+                    "'Que vois-tu ?', 'Quelle couleur a mon t-shirt ?', "
+                    "'Combien de personnes sont présentes ?', "
+                    "'Que dit ce panneau ?'"
+                ),
+            },
+        },
+        "required": ["question"],
+    },
+}
+
+
+_FIND_OBJECT_TOOL = {
+    "type": "function",
+    "name": "find_object",
+    "description": (
+        "Localise un objet dans l'image et oriente la tête du robot vers "
+        "lui. À utiliser quand l'utilisateur dit 'regarde le X', 'où est "
+        "le X', 'pointe vers X'. Le robot tournera physiquement la tête "
+        "vers l'objet trouvé. Ne fonctionne qu'avec un backend vision "
+        "supportant le grounding (Moondream)."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "target": {
+                "type": "string",
+                "description": (
+                    "Nom de l'objet ou de la personne à localiser. Sois "
+                    "concret : 'tasse rouge', 'visage', 'téléphone', "
+                    "'porte'. Une chaîne par appel."
+                ),
+            },
+        },
+        "required": ["target"],
     },
 }
 
@@ -169,11 +251,24 @@ _MOVE_SEQUENCE_TOOL = {
 }
 
 
-def build_tools(emotion_names: list[str]) -> list[dict]:
+def build_tools(
+    emotion_names: list[str],
+    *,
+    vision_enabled: bool = False,
+    vision_grounding: bool = False,
+) -> list[dict]:
     """Build the function-calling tools list with `play_emotion`'s enum
     populated from the actual emotion library (instead of a hardcoded
-    constant that drifts from the dataset)."""
-    return [
+    constant that drifts from the dataset).
+
+    Args:
+        emotion_names: enum values for play_emotion.
+        vision_enabled: include look_and_describe (and the system prompt
+            additions made by the bridge).
+        vision_grounding: include find_object (only when the backend
+            supports detect/point — Moondream does, FastVLM does not).
+    """
+    tools: list[dict] = [
         {
             "type": "function",
             "name": "play_emotion",
@@ -198,3 +293,8 @@ def build_tools(emotion_names: list[str]) -> list[dict]:
         _LOOK_TOOL,
         _MOVE_SEQUENCE_TOOL,
     ]
+    if vision_enabled:
+        tools.append(_LOOK_AND_DESCRIBE_TOOL)
+    if vision_grounding:
+        tools.append(_FIND_OBJECT_TOOL)
+    return tools

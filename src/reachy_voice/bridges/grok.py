@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from .base import VoiceBridge, REALTIME_RATE
 from .._log import log
-from ..tools import INSTRUCTIONS
+from ..tools import build_instructions
 
 if TYPE_CHECKING:
     from reachy_mini import ReachyMini
@@ -78,7 +78,10 @@ class GrokVoiceBridge(VoiceBridge):
         # output still streamed). Reverted; xAI has no documented
         # text-only switch as of 2026-05.
         return {
-            "instructions": INSTRUCTIONS,
+            "instructions": build_instructions(
+                vision_enabled=self._vision is not None,
+                vision_grounding=bool(self._vision and self._vision.supports_grounding),
+            ),
             "turn_detection": {"type": "server_vad"},
             "audio": {
                 "input": {

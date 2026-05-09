@@ -21,6 +21,7 @@ from scipy.signal import resample_poly
 from .._log import log
 from ..emotions import EmotionPlayer
 from ..tools import LOOK_POSES, _make_head_pose, build_tools
+from ..vision import CameraWorker, VisionBackend, build_vision_backend
 
 if TYPE_CHECKING:
     from reachy_mini import ReachyMini
@@ -68,10 +69,29 @@ class VoiceBridge(abc.ABC):
             self.mini, RecordedMoves("pollen-robotics/reachy-mini-emotions-library")
         )
 
+        # Optional vision backend (Moondream cloud / FastVLM HTTP / off).
+        # The camera worker is only started when a backend is configured
+        # to avoid wasting CPU/bandwidth on the Pi when vision is unused.
+        self._vision: VisionBackend | None = None
+        self._camera: CameraWorker | None = None
+        try:
+            self._vision = build_vision_backend()
+        except Exception as e:
+            log(f"[vision] backend init failed, vision disabled: {e}")
+            self._vision = None
+        if self._vision is not None:
+            self._camera = CameraWorker(self.mini, fps=5.0)
+
         # Build the tools list with the play_emotion enum populated
         # from the library actually loaded — keeps the API in sync with
         # the dataset (no more hardcoded list to maintain by hand).
-        self.tools = build_tools(sorted(self._emotions.library.list_moves()))
+        vision_enabled = self._vision is not None
+        vision_grounding = bool(self._vision and self._vision.supports_grounding)
+        self.tools = build_tools(
+            sorted(self._emotions.library.list_moves()),
+            vision_enabled=vision_enabled,
+            vision_grounding=vision_grounding,
+        )
     
     # ---- Abstract methods (provider-specific) ----
     @abc.abstractmethod
@@ -151,6 +171,8 @@ class VoiceBridge(abc.ABC):
         ws.send(json.dumps({"type": "session.update", "session": self.get_session_config()}))
         self.media.start_playing()
         self.media.start_recording()
+        if self._camera is not None:
+            self._camera.start()
         self._mic_thread = threading.Thread(target=self._mic_loop, daemon=True)
         self._mic_thread.start()
     
@@ -188,6 +210,16 @@ class VoiceBridge(abc.ABC):
         log(f"[ws] closed code={code} msg={msg}")
         log(f"[cost] session total: ${self._cost_total:.4f} over {self._turns} turn(s)")
         self._stop.set()
+        if self._camera is not None:
+            try:
+                self._camera.stop()
+            except Exception as e:
+                log(f"[camera] stop failed: {e}")
+        if self._vision is not None:
+            try:
+                self._vision.close()
+            except Exception:
+                pass
     
     # ---- Main message handler ----
     def _on_message(self, ws: websocket.WebSocketApp, raw: str) -> None:
@@ -322,7 +354,13 @@ class VoiceBridge(abc.ABC):
             else:
                 self._run_move_async(lambda: self._play_sequence(steps))
                 result = f"playing:{len(steps)}_steps"
-        
+
+        elif name == "look_and_describe":
+            result = self._handle_look_and_describe(args.get("question", ""))
+
+        elif name == "find_object":
+            result = self._handle_find_object(args.get("target", ""))
+
         else:
             result = f"unknown_tool:{name}"
         
@@ -336,6 +374,70 @@ class VoiceBridge(abc.ABC):
         })
         self._needs_followup_response = True
     
+    # ---- Vision tool handlers ----
+    def _handle_look_and_describe(self, question: str) -> str:
+        if self._vision is None or self._camera is None:
+            return "vision_not_enabled"
+        question = (question or "").strip()
+        if not question:
+            return "empty_question"
+        frame = self._camera.get_latest()
+        if frame is None:
+            return "no_frame_available"
+        try:
+            res = self._vision.query(frame, question)
+        except Exception as e:
+            log(f"[vision] query failed: {e}")
+            return f"error:{e}"
+        return res.text or "no_answer"
+
+    def _handle_find_object(self, target: str) -> str:
+        if self._vision is None or self._camera is None:
+            return "vision_not_enabled"
+        if not self._vision.supports_grounding:
+            return "grounding_not_supported"
+        target = (target or "").strip()
+        if not target:
+            return "empty_target"
+        frame = self._camera.get_latest()
+        if frame is None:
+            return "no_frame_available"
+
+        # Prefer point() (single coord) over detect() — closer to what
+        # we actually need (where to aim the head).
+        try:
+            res = self._vision.point(frame, target)
+        except Exception as e:
+            log(f"[vision] point failed: {e}")
+            return f"error:{e}"
+
+        if not res.points:
+            # Fallback: try detect() and use bbox center.
+            try:
+                det = self._vision.detect(frame, target)
+            except Exception as e:
+                log(f"[vision] detect failed: {e}")
+                return f"not_found:{target}"
+            if not det.boxes:
+                return f"not_found:{target}"
+            cx, cy = det.boxes[0].center
+        else:
+            cx, cy = res.points[0].x, res.points[0].y
+
+        # Normalized [0,1] → pixels for look_at_image.
+        h, w, _ = frame.shape
+        px, py = cx * w, cy * h
+
+        def _aim() -> None:
+            try:
+                pose = self.mini.look_at_image(px, py, duration=0.0, perform_movement=False)
+                self.mini.goto_target(pose, duration=0.6)
+            except Exception as e:
+                log(f"[vision] look_at_image failed: {e}")
+
+        self._run_move_async(_aim)
+        return f"found:{target}@({cx:.2f},{cy:.2f})"
+
     def _play_sequence(self, steps: list) -> None:
         """Execute a planned head choreography."""
         import numpy as np

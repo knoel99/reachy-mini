@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from .base import VoiceBridge, REALTIME_RATE
 from .._log import log
-from ..tools import INSTRUCTIONS
+from ..tools import build_instructions
 
 if TYPE_CHECKING:
     from reachy_mini import ReachyMini
@@ -70,7 +70,10 @@ class OpenAIRealtimeBridge(VoiceBridge):
         session = {
             "type": "realtime",
             "output_modalities": ["text"],
-            "instructions": INSTRUCTIONS,
+            "instructions": build_instructions(
+                vision_enabled=self._vision is not None,
+                vision_grounding=bool(self._vision and self._vision.supports_grounding),
+            ),
             "audio": {
                 "input": {
                     "format": {"type": "audio/pcm", "rate": REALTIME_RATE},
