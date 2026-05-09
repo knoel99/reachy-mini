@@ -50,13 +50,25 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _resolve_provider_and_model(args: argparse.Namespace) -> tuple[str, str]:
-    provider = args.provider or os.environ.get("VOICE_PROVIDER", "openai")
+    provider = args.provider
+    model = args.model
+
+    # When only --model is given, infer provider from the prefix
+    # (gpt-* → openai, grok-* → grok). Lets `./run.sh --model X` and
+    # `./run.sh X` behave the same.
+    if model and not provider:
+        if model.startswith("gpt-"):
+            provider = "openai"
+        elif model.startswith("grok-"):
+            provider = "grok"
+
+    provider = provider or os.environ.get("VOICE_PROVIDER", "openai")
     if provider == "openai":
-        model = args.model or os.environ.get(
+        model = model or os.environ.get(
             "OPENAI_REALTIME_MODEL", "gpt-realtime-mini"
         )
     elif provider == "grok":
-        model = args.model or os.environ.get(
+        model = model or os.environ.get(
             "GROK_CHAT_MODEL", "grok-4-1-fast-non-reasoning"
         )
     else:
