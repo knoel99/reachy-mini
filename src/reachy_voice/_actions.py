@@ -34,12 +34,22 @@ class RobotActions:
         self.tools = build_tools(sorted(self._emotions.library.list_moves()))
         self._move_thread: threading.Thread | None = None
 
+    def is_speaking(self) -> bool:
+        """True while an emotion's bundled audio is still playing."""
+        return self._emotions.is_speaking()
+
     def execute(self, name: str, args: dict) -> str:
-        """Execute a tool call. Returns a short status string for the LLM."""
+        """Schedule a tool call. Returns a short status string for the LLM.
+
+        Every action goes through the same single-worker queue so head
+        movements and emotion sounds never compete on the motors or
+        speaker. Calls return immediately; the worker runs each action
+        to completion before starting the next.
+        """
         if name == "play_emotion":
             emo = args.get("name", "")
-            played = self._emotions.play(emo, min_interval=0.0)
-            return f"played:{emo}" if played else f"skipped:{emo}"
+            self._run_async(lambda: self._emotions.play(emo))
+            return f"queued:{emo}"
 
         if name == "look":
             direction = args.get("direction", "center")
@@ -54,7 +64,7 @@ class RobotActions:
             if not steps:
                 return "empty_sequence"
             self._run_async(lambda: self._play_sequence(steps))
-            return f"playing:{len(steps)}_steps"
+            return f"queued:{len(steps)}_steps"
 
         return f"unknown_tool:{name}"
 

@@ -195,6 +195,10 @@ class OpenAIRealtimeBridge:
             if samples is None or len(samples) == 0:
                 time.sleep(0.01)
                 continue
+            # Drop frames while the robot's own audio is playing — the
+            # speaker can otherwise loop back as user input.
+            if self.actions.is_speaking():
+                continue
             mono = samples if samples.ndim == 1 else samples.mean(axis=1)
             resampled = self._resample(
                 mono.astype(np.float32), self.in_rate, REALTIME_RATE

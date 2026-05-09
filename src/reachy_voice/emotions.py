@@ -1,8 +1,18 @@
-"""Emotion playback: preloaded WAVs + parallel motion via the SDK."""
+"""Emotion playback: preloaded WAVs + bundled motion via the SDK.
+
+`play(name)` runs **synchronously** — it pushes the audio sample,
+blocks on the move, then sleeps until the sound has finished
+playing. Callers should drive concurrency through their own queue
+(e.g. `RobotActions._run_async`); the player itself never spawns
+threads.
+
+A monotonic `_speaking_until` timestamp is exposed via
+`is_speaking()` so the mic loop can gate its capture and avoid
+re-injecting the robot's own audio as a user utterance.
+"""
 
 from __future__ import annotations
 
-import threading
 import time
 from typing import TYPE_CHECKING
 
@@ -16,20 +26,21 @@ if TYPE_CHECKING:
     from reachy_mini import ReachyMini
 
 
-class EmotionPlayer:
-    """Plays emotion movements with their preloaded sounds.
+# Extra padding kept on `_speaking_until` after the nominal sound
+# duration, to absorb media-pipeline latency between push and audio
+# actually leaving the speaker.
+_SPEAKING_PAD_S = 0.5
 
-    Sounds are loaded into RAM at construction (float32 mono @ target rate)
-    so playback adds only a dict lookup + push_audio_sample call.
-    """
+
+class EmotionPlayer:
+    """Plays emotion movements with their preloaded sounds (sync)."""
 
     DEFAULT_TARGET_RATE = 16_000  # ReSpeaker XVF3800 default
 
     def __init__(self, mini: ReachyMini, library) -> None:
         self.mini = mini
         self.library = library
-        self._busy = threading.Lock()
-        self._last_t = 0.0
+        self._speaking_until: float = 0.0
 
         rate = -1
         try:
@@ -100,41 +111,49 @@ class EmotionPlayer:
             samples = samples.mean(axis=1).astype(np.float32, copy=False)
         return samples
 
-    def play(self, name: str, min_interval: float = 2.5) -> bool:
-        now = time.monotonic()
-        if (now - self._last_t) < min_interval:
-            return False
-        if not self._busy.acquire(blocking=False):
-            return False
+    def is_speaking(self) -> bool:
+        """True while a previously pushed sound is still playing."""
+        return time.monotonic() < self._speaking_until
 
+    def play(self, name: str) -> bool:
+        """Push the sound, run the move, then block until the sound has
+        finished. Returns False only if the emotion is unknown.
+        """
         try:
             move = self.library.get(name)
         except Exception as e:
-            self._busy.release()
             log(f"[emotion] unknown: {name} ({e})")
             return False
         if move is None:
-            self._busy.release()
             log(f"[emotion] unknown: {name}")
             return False
 
-        self._last_t = now
         samples = self._sounds.get(name)
+        sound_dur = (
+            len(samples) / self._target_rate if samples is not None else 0.0
+        )
 
-        def _run() -> None:
-            t0 = time.monotonic()
-            try:
-                if samples is not None:
-                    try:
-                        self.mini.media.push_audio_sample(samples)
-                    except Exception as e:
-                        log(f"[emotion] push_audio_sample '{name}' failed: {e}")
-                self.mini.play_move(move, initial_goto_duration=0.5)
-            except Exception as e:
-                log(f"[emotion] play '{name}' failed: {e}")
-            finally:
-                self._busy.release()
-            log(f"[emotion] '{name}' done in {time.monotonic() - t0:.2f}s")
-
-        threading.Thread(target=_run, daemon=True).start()
+        t0 = time.monotonic()
+        # Mark the speaker as busy *before* pushing so the mic loop
+        # doesn't capture the very first samples back as user input.
+        if sound_dur > 0:
+            self._speaking_until = t0 + sound_dur + _SPEAKING_PAD_S
+        try:
+            if samples is not None:
+                try:
+                    self.mini.media.push_audio_sample(samples)
+                except Exception as e:
+                    log(f"[emotion] push_audio_sample '{name}' failed: {e}")
+            self.mini.play_move(move, initial_goto_duration=0.5)
+            # Hold until the sound has actually played out — even if the
+            # bundled move was shorter.
+            rem = self._speaking_until - time.monotonic()
+            if rem > 0:
+                time.sleep(rem)
+        except Exception as e:
+            log(f"[emotion] play '{name}' failed: {e}")
+            return False
+        finally:
+            self._speaking_until = 0.0
+        log(f"[emotion] '{name}' done in {time.monotonic() - t0:.2f}s")
         return True

@@ -99,6 +99,10 @@ class GrokChatBridge:
             if samples is None or len(samples) == 0:
                 time.sleep(0.01)
                 continue
+            # Drop frames while the robot's own audio is playing so the
+            # mic doesn't pick up the speaker as a "user" utterance.
+            if self.actions.is_speaking():
+                continue
             mono = samples if samples.ndim == 1 else samples.mean(axis=1)
             mono = self._resample_to_16k(mono.astype(np.float32))
             for utt in self.vad.feed(mono):
