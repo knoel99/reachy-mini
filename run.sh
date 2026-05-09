@@ -23,24 +23,26 @@ set -a; source .env; set +a
 # Shorthand: `./run.sh <provider> <model>` overrides provider/model without
 # editing .env. Any extra args are forwarded to the bridge.
 #
-# OpenAI provider (default):
-#   ./run.sh mini    → provider=openai model=gpt-realtime-mini
-#   ./run.sh full    → provider=openai model=gpt-realtime
-#   ./run.sh full2   → provider=openai model=gpt-realtime-2
+# OpenAI Realtime (audio-in, text-out):
+#   ./run.sh mini    → openai gpt-realtime-mini
+#   ./run.sh full    → openai gpt-realtime
+#   ./run.sh full2   → openai gpt-realtime-2
 #
-# xAI/Grok provider:
-#   ./run.sh grok    → provider=xai model=grok-voice-think-fast-1.0
+# Grok chat-with-tools (mic → STT → chat → tools):
+#   ./run.sh grok    → grok grok-4-1-fast-non-reasoning
+#   ./run.sh grok-r  → grok grok-4-1-fast-reasoning
 #
 # Custom:
 #   ./run.sh openai custom-model
-#   ./run.sh xai custom-model
+#   ./run.sh grok   custom-model
 EXTRA=()
 case "${1:-}" in
-  mini)  EXTRA+=(--provider openai --model gpt-realtime-mini); shift ;;
-  full)  EXTRA+=(--provider openai --model gpt-realtime);      shift ;;
-  full2) EXTRA+=(--provider openai --model gpt-realtime-2);    shift ;;
-  grok)  EXTRA+=(--provider xai --model grok-voice-think-fast-1.0); export GROK_DEBUG_USAGE=1; shift ;;
-  openai|xai)
+  mini)   EXTRA+=(--provider openai --model gpt-realtime-mini);            shift ;;
+  full)   EXTRA+=(--provider openai --model gpt-realtime);                 shift ;;
+  full2)  EXTRA+=(--provider openai --model gpt-realtime-2);               shift ;;
+  grok)   EXTRA+=(--provider grok   --model grok-4-1-fast-non-reasoning);  shift ;;
+  grok-r) EXTRA+=(--provider grok   --model grok-4-1-fast-reasoning);      shift ;;
+  openai|grok)
     EXTRA+=(--provider "$1")
     shift
     if [ -n "${1:-}" ]; then

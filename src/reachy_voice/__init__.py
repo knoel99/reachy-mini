@@ -1,25 +1,24 @@
 """Reachy Mini voice bridge package.
 
-Connects a Reachy Mini Wireless to a realtime voice API (OpenAI
-Realtime / Grok Voice Think Fast). The model has no TTS: it analyses
-the user's speech and reacts purely via tool calls (head movements +
-preloaded emotion sounds).
+The robot has no TTS: each provider parses the user's speech (server
+VAD on the realtime path, local VAD + STT on the chat path) and the
+LLM reacts purely via tool calls (head movements + preloaded emotion
+sounds).
 
 Public API:
 
-- :class:`bridges.VoiceBridge`, :class:`bridges.OpenAIRealtimeBridge`,
-  :class:`bridges.GrokVoiceBridge`
+- :class:`openai.OpenAIRealtimeBridge` — OpenAI Realtime WebSocket.
+- :class:`grok.GrokChatBridge` — Grok chat-with-tools via xAI STT.
 - :class:`emotions.EmotionPlayer`
-- :func:`tools.build_tools`, :data:`tools.INSTRUCTIONS`,
-  :data:`tools.LOOK_POSES`
+- :func:`tools.build_tools`, :data:`tools.INSTRUCTIONS`
 """
 
-from .bridges import GrokVoiceBridge, OpenAIRealtimeBridge, VoiceBridge
 from .emotions import EmotionPlayer
+from .grok import GrokChatBridge
+from .openai import OpenAIRealtimeBridge
 
 __all__ = [
     "EmotionPlayer",
-    "GrokVoiceBridge",
+    "GrokChatBridge",
     "OpenAIRealtimeBridge",
-    "VoiceBridge",
 ]
