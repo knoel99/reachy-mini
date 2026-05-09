@@ -1,0 +1,173 @@
+"""Melody synthesis: LLM-planned notes rendered as a sine wave (sync).
+
+`play(notes, tempo_bpm=None)` synthesises the whole buffer in one
+shot, pushes it via `mini.media.push_audio_sample` (the same channel
+used by `EmotionPlayer`), then sleeps until the audio has played out.
+
+Like `EmotionPlayer`, this module never spawns threads — concurrency
+is the caller's job (`RobotActions._run_async`). A monotonic
+`_speaking_until` timestamp is exposed via `is_speaking()` so the mic
+loop gates capture and avoids re-injecting the robot's own audio.
+"""
+
+from __future__ import annotations
+
+import re
+import time
+from typing import TYPE_CHECKING
+
+import numpy as np
+
+from ._log import log
+
+if TYPE_CHECKING:
+    from reachy_mini import ReachyMini
+
+
+_SPEAKING_PAD_S = 0.5
+
+_MAX_NOTES = 64
+_MIN_DUR_S = 0.05
+_MAX_DUR_S = 2.0
+_MIN_BPM = 30.0
+_MAX_BPM = 300.0
+_MIN_MIDI = 33   # A1  (~55 Hz)
+_MAX_MIDI = 96   # C7  (~2093 Hz)
+_AMPLITUDE = 0.5
+
+_PITCH_RE = re.compile(r"^([A-Ga-g])([#b]?)(-?\d+)$")
+_NOTE_OFFSETS = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
+
+
+def _pitch_to_hz(pitch: str) -> float | None:
+    """Parse scientific pitch notation ('C4', 'F#5', 'Bb3') to Hz.
+
+    Returns None for rests ('R'/'rest') or out-of-range pitches.
+    """
+    if not isinstance(pitch, str):
+        return None
+    p = pitch.strip()
+    if p.lower() in ("r", "rest", ""):
+        return None
+    m = _PITCH_RE.match(p)
+    if not m:
+        log(f"[melody] bad pitch: {pitch!r}")
+        return None
+    letter, accidental, octave_s = m.groups()
+    semitone = _NOTE_OFFSETS[letter.upper()]
+    if accidental == "#":
+        semitone += 1
+    elif accidental == "b":
+        semitone -= 1
+    midi = 12 * (int(octave_s) + 1) + semitone
+    if midi < _MIN_MIDI or midi > _MAX_MIDI:
+        log(f"[melody] pitch {pitch!r} out of range (midi={midi})")
+        return None
+    return 440.0 * (2.0 ** ((midi - 69) / 12.0))
+
+
+class MelodyPlayer:
+    """Renders LLM-supplied note sequences as a sine wave (sync)."""
+
+    DEFAULT_TARGET_RATE = 16_000  # ReSpeaker XVF3800 default
+
+    def __init__(self, mini: ReachyMini) -> None:
+        self.mini = mini
+        self._speaking_until: float = 0.0
+
+        rate = -1
+        try:
+            rate = mini.media.get_output_audio_samplerate()
+        except Exception:
+            pass
+        self._target_rate = rate if rate and rate > 0 else self.DEFAULT_TARGET_RATE
+
+    def is_speaking(self) -> bool:
+        """True while a previously pushed melody is still playing."""
+        return time.monotonic() < self._speaking_until
+
+    def _synthesize(
+        self, notes: list[dict], tempo_bpm: float | None
+    ) -> np.ndarray:
+        rate = self._target_rate
+        beat_s: float | None = None
+        if tempo_bpm is not None:
+            try:
+                bpm = float(tempo_bpm)
+            except (TypeError, ValueError):
+                bpm = 120.0
+            bpm = max(_MIN_BPM, min(_MAX_BPM, bpm))
+            beat_s = 60.0 / bpm
+
+        if len(notes) > _MAX_NOTES:
+            log(f"[melody] {len(notes)} notes > {_MAX_NOTES}, truncating")
+            notes = notes[:_MAX_NOTES]
+
+        chunks: list[np.ndarray] = []
+        for note in notes:
+            if not isinstance(note, dict):
+                continue
+            pitch = note.get("pitch", "R")
+            try:
+                raw_dur = float(note.get("duration", 0.25))
+            except (TypeError, ValueError):
+                raw_dur = 0.25
+            dur_s = raw_dur * beat_s if beat_s is not None else raw_dur
+            dur_s = max(_MIN_DUR_S, min(_MAX_DUR_S, dur_s))
+
+            n = int(rate * dur_s)
+            if n <= 0:
+                continue
+
+            freq = _pitch_to_hz(pitch)
+            if freq is None:
+                chunks.append(np.zeros(n, dtype=np.float32))
+                continue
+
+            t = np.arange(n, dtype=np.float32) / float(rate)
+            samples = (_AMPLITUDE * np.sin(2.0 * np.pi * freq * t)).astype(
+                np.float32, copy=False
+            )
+
+            env_n = int(rate * min(0.005, dur_s / 4.0))
+            if env_n > 0:
+                ramp = np.linspace(0.0, 1.0, env_n, dtype=np.float32)
+                samples[:env_n] *= ramp
+                samples[-env_n:] *= ramp[::-1]
+            chunks.append(samples)
+
+        if not chunks:
+            return np.zeros(0, dtype=np.float32)
+        return np.concatenate(chunks).astype(np.float32, copy=False)
+
+    def play(
+        self, notes: list[dict], tempo_bpm: float | None = None
+    ) -> bool:
+        """Synthesise + push + block until the audio has played out."""
+        if not notes:
+            return False
+
+        samples = self._synthesize(notes, tempo_bpm)
+        if samples.size == 0:
+            log("[melody] empty buffer after synthesis")
+            return False
+
+        sound_dur = samples.size / self._target_rate
+        t0 = time.monotonic()
+        self._speaking_until = t0 + sound_dur + _SPEAKING_PAD_S
+        try:
+            try:
+                self.mini.media.push_audio_sample(samples)
+            except Exception as e:
+                log(f"[melody] push_audio_sample failed: {e}")
+                return False
+            rem = self._speaking_until - time.monotonic()
+            if rem > 0:
+                time.sleep(rem)
+        finally:
+            self._speaking_until = 0.0
+        log(
+            f"[melody] {len(notes)} notes, {sound_dur:.2f}s done in "
+            f"{time.monotonic() - t0:.2f}s"
+        )
+        return True

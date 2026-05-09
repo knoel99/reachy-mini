@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from ._log import log
 from .emotions import EmotionPlayer
+from .melody import MelodyPlayer
 from .tools import LOOK_POSES, _make_head_pose, build_tools
 
 if TYPE_CHECKING:
@@ -31,12 +32,13 @@ class RobotActions:
             self.mini,
             RecordedMoves("pollen-robotics/reachy-mini-emotions-library"),
         )
+        self._melody = MelodyPlayer(self.mini)
         self.tools = build_tools(sorted(self._emotions.library.list_moves()))
         self._move_thread: threading.Thread | None = None
 
     def is_speaking(self) -> bool:
-        """True while an emotion's bundled audio is still playing."""
-        return self._emotions.is_speaking()
+        """True while an emotion or melody is still playing."""
+        return self._emotions.is_speaking() or self._melody.is_speaking()
 
     def execute(self, name: str, args: dict) -> str:
         """Schedule a tool call. Returns a short status string for the LLM.
@@ -65,6 +67,14 @@ class RobotActions:
                 return "empty_sequence"
             self._run_async(lambda: self._play_sequence(steps))
             return f"queued:{len(steps)}_steps"
+
+        if name == "play_melody":
+            notes = args.get("notes") or []
+            if not notes:
+                return "empty_melody"
+            tempo = args.get("tempo_bpm")
+            self._run_async(lambda: self._melody.play(notes, tempo))
+            return f"queued:{len(notes)}_notes"
 
         return f"unknown_tool:{name}"
 

@@ -34,7 +34,7 @@ Tu disposes :
 - d'une bibliothèque d'émotions préenregistrées (mouvement + son).
 
 # Outils
-Tu as TROIS outils :
+Tu as QUATRE outils :
 
 - `play_emotion(name)` — joue une émotion préenregistrée (mouvement
   de tête + antennes + son audio joint).
@@ -48,6 +48,13 @@ Tu as TROIS outils :
   (yaw/pitch/roll en degrés + durée). Renseigne `archetype` quand
   l'intention rentre dans un pattern connu (`nod`, `shake`, `circle`,
   `figure_eight`, `dance`, `mime`, `explore`).
+- `play_melody(notes, tempo_bpm?)` — joue une mélodie via un simple
+  bip sinus. À utiliser quand l'utilisateur te demande de chanter,
+  jouer une chanson connue (Joyeux anniversaire, Frère Jacques, Au
+  clair de la lune…) ou d'inventer un petit air. Tu PLANIFIES la
+  séquence de notes (entre 8 et 32 pour rester reconnaissable). Le
+  timbre est rudimentaire — vise la justesse mélodique plutôt que la
+  richesse sonore.
 
 # Règles
 - Tu agis EXCLUSIVEMENT par appels d'outils. Pas de texte de réponse.
@@ -56,6 +63,8 @@ Tu as TROIS outils :
 - Pour toute demande de forme géométrique, danse ou imitation
   (cercle, infini, danse, poule, chat…), émets UN appel
   `move_sequence` avec ≥ 6 keyframes pour que ce soit lisible.
+- Ne combine pas `play_melody` avec `play_emotion` (les deux occupent
+  le même haut-parleur).
 - Ne réponds JAMAIS « je ne peux pas bouger » — tu peux toujours.
   Si la demande est complexe, planifie-la dans `move_sequence`.
 """
@@ -169,6 +178,51 @@ _MOVE_SEQUENCE_TOOL = {
 }
 
 
+_PLAY_MELODY_TOOL = {
+    "type": "function",
+    "name": "play_melody",
+    "description": (
+        "Joue une mélodie via synthèse sinus simple. À UTILISER quand "
+        "l'utilisateur demande de chanter, jouer une chanson connue "
+        "(Joyeux anniversaire, Frère Jacques, Au clair de la lune…) "
+        "ou d'inventer un petit air. TU PLANIFIES la suite de notes. "
+        "Vise 8 à 32 notes pour que la mélodie soit reconnaissable. "
+        "Pitches en notation scientifique ('C4', 'F#5', 'Bb3'). "
+        "Utilise 'R' pour un silence. Si tu fournis `tempo_bpm`, les "
+        "durées s'expriment en battements (1.0 = noire) ; sinon en "
+        "secondes."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "notes": {
+                "type": "array",
+                "description": "Suite ordonnée de notes (8 à 32 typiquement, max 64).",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "pitch": {
+                            "type": "string",
+                            "description": "Note en notation scientifique (ex. 'C4', 'F#5', 'Bb3') ou 'R' pour un silence. Plage utile A1..C7.",
+                        },
+                        "duration": {
+                            "type": "number",
+                            "description": "Durée. En secondes (0.05..2.0) si tempo_bpm absent ; sinon en battements (1.0=noire).",
+                        },
+                    },
+                    "required": ["pitch", "duration"],
+                },
+            },
+            "tempo_bpm": {
+                "type": "number",
+                "description": "Optionnel. Tempo en battements par minute (30..300). Si fourni, `duration` est interprété en battements.",
+            },
+        },
+        "required": ["notes"],
+    },
+}
+
+
 def build_tools(emotion_names: list[str]) -> list[dict]:
     """Build the function-calling tools list with `play_emotion`'s enum
     populated from the actual emotion library (instead of a hardcoded
@@ -202,6 +256,7 @@ def build_tools(emotion_names: list[str]) -> list[dict]:
         },
         _LOOK_TOOL,
         _MOVE_SEQUENCE_TOOL,
+        _PLAY_MELODY_TOOL,
     ]
 
 
