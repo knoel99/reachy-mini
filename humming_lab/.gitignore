@@ -1,0 +1,6 @@
+# Reproducible from `python scripts/export_emotion_sounds.py humming_lab/data/sources`
+data/sources/
+# Reproducible from `python humming_lab/scripts/03_synthesize.py`
+data/outputs/
+__pycache__/
+*.pyc
