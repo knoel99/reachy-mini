@@ -35,6 +35,24 @@ _MIN_MIDI = 33   # A1  (~55 Hz)
 _MAX_MIDI = 96   # C7  (~2093 Hz)
 _AMPLITUDE = 0.5
 
+# Additive timbre: fundamental + 2nd + 3rd harmonics. Gives a flute-ish
+# tone that's far less sterile than a pure sine without ever needing a
+# soundfont.
+_HARMONICS = ((1, 1.00), (2, 0.30), (3, 0.15))
+_HARMONIC_SUM = sum(a for _, a in _HARMONICS)
+
+# Vibrato: ±5 cents at 5 Hz. 5 cents = 2^(5/1200) - 1 ≈ 0.00289.
+_VIBRATO_DEPTH = 0.00289
+_VIBRATO_HZ = 5.0
+# Don't apply vibrato to very short notes (it sounds like detuning).
+_VIBRATO_MIN_DUR_S = 0.20
+
+# ADSR envelope (in seconds, before per-note clamping).
+_ATTACK_S = 0.015
+_DECAY_S = 0.050
+_SUSTAIN_LVL = 0.7
+_RELEASE_S = 0.080
+
 _PITCH_RE = re.compile(r"^([A-Ga-g])([#b]?)(-?\d+)$")
 _NOTE_OFFSETS = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
 
@@ -86,6 +104,50 @@ class MelodyPlayer:
         """True while a previously pushed melody is still playing."""
         return time.monotonic() < self._speaking_until
 
+    @staticmethod
+    def _envelope(n: int, rate: int) -> np.ndarray:
+        """Linear ADSR envelope, clamped to fit very short notes."""
+        a = min(int(rate * _ATTACK_S), n // 4)
+        d = min(int(rate * _DECAY_S), max(0, (n - a) // 3))
+        r = min(int(rate * _RELEASE_S), max(0, n - a - d))
+        s_len = max(0, n - a - d - r)
+        env = np.empty(n, dtype=np.float32)
+        if a > 0:
+            env[:a] = np.linspace(0.0, 1.0, a, dtype=np.float32)
+        if d > 0:
+            env[a:a + d] = np.linspace(
+                1.0, _SUSTAIN_LVL, d, dtype=np.float32
+            )
+        if s_len > 0:
+            env[a + d:a + d + s_len] = _SUSTAIN_LVL
+        if r > 0:
+            env[a + d + s_len:] = np.linspace(
+                _SUSTAIN_LVL if d > 0 or s_len > 0 else 1.0,
+                0.0, r, dtype=np.float32,
+            )
+        return env
+
+    @staticmethod
+    def _render_note(
+        freq: float, dur_s: float, n: int, rate: int
+    ) -> np.ndarray:
+        """Sum-of-harmonics tone with optional vibrato and ADSR."""
+        t = np.arange(n, dtype=np.float32) / float(rate)
+        if dur_s >= _VIBRATO_MIN_DUR_S:
+            vib = 1.0 + _VIBRATO_DEPTH * np.sin(
+                2.0 * np.pi * _VIBRATO_HZ * t
+            )
+            phase = 2.0 * np.pi * freq * np.cumsum(vib) / float(rate)
+        else:
+            phase = 2.0 * np.pi * freq * t
+
+        wave = np.zeros(n, dtype=np.float32)
+        for k, amp in _HARMONICS:
+            wave += amp * np.sin(k * phase)
+        wave *= _AMPLITUDE / _HARMONIC_SUM
+        wave *= MelodyPlayer._envelope(n, rate)
+        return wave.astype(np.float32, copy=False)
+
     def _synthesize(
         self, notes: list[dict], tempo_bpm: float | None
     ) -> np.ndarray:
@@ -124,17 +186,7 @@ class MelodyPlayer:
                 chunks.append(np.zeros(n, dtype=np.float32))
                 continue
 
-            t = np.arange(n, dtype=np.float32) / float(rate)
-            samples = (_AMPLITUDE * np.sin(2.0 * np.pi * freq * t)).astype(
-                np.float32, copy=False
-            )
-
-            env_n = int(rate * min(0.005, dur_s / 4.0))
-            if env_n > 0:
-                ramp = np.linspace(0.0, 1.0, env_n, dtype=np.float32)
-                samples[:env_n] *= ramp
-                samples[-env_n:] *= ramp[::-1]
-            chunks.append(samples)
+            chunks.append(self._render_note(freq, dur_s, n, rate))
 
         if not chunks:
             return np.zeros(0, dtype=np.float32)
