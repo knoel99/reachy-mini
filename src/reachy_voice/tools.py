@@ -261,10 +261,14 @@ def build_tools(
     populated from the actual emotion library (instead of a hardcoded
     constant that drifts from the dataset).
 
+    Output is in Realtime API format (`{type, name, description,
+    parameters}`). Chat Completions wraps the function spec under a
+    `function` key — use `to_chat_tools()` to convert.
+
     Args:
         emotion_names: enum values for play_emotion.
-        vision_enabled: include look_and_describe (and the system prompt
-            additions made by the bridge).
+        vision_enabled: include look_and_describe (and the matching
+            system-prompt additions in build_instructions).
         vision_grounding: include find_object (only when the backend
             supports detect/point — Moondream does, FastVLM does not).
     """
@@ -298,3 +302,16 @@ def build_tools(
     if vision_grounding:
         tools.append(_FIND_OBJECT_TOOL)
     return tools
+
+
+def to_chat_tools(realtime_tools: list[dict]) -> list[dict]:
+    """Convert Realtime-format tools to Chat-Completions format."""
+    chat = []
+    for t in realtime_tools:
+        if t.get("type") != "function":
+            continue
+        chat.append({
+            "type": "function",
+            "function": {k: v for k, v in t.items() if k != "type"},
+        })
+    return chat

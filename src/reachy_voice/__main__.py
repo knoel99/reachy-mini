@@ -2,12 +2,14 @@
 
 Run with:
 
-    python -m reachy_voice [--provider openai|xai] [--model NAME]
+    python -m reachy_voice [--provider openai|grok] [--model NAME]
 
-Connects a Reachy Mini Wireless to a realtime voice API (OpenAI
-Realtime / Grok Voice Think Fast). The robot has no TTS: the model
-analyses the user's speech and reacts via tool calls only (head
-movements + preloaded emotion sounds).
+The robot has no TTS: the model parses the user's speech and reacts
+via tool calls only (head movements + preloaded emotion sounds).
+
+Provider stacks:
+- ``openai`` → realtime WebSocket (audio-in, text-out).
+- ``grok``   → mic → VAD → STT → /v1/chat/completions with tools.
 """
 
 from __future__ import annotations
@@ -24,36 +26,51 @@ from reachy_mini.reachy_mini import (
 )
 
 from ._log import log
-from .bridges import GrokVoiceBridge, OpenAIRealtimeBridge, VoiceBridge
 
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="reachy-voice",
-        description="Reachy Mini <-> Voice API bridge (OpenAI / Grok).",
+        description="Reachy Mini <-> Voice API bridge (OpenAI Realtime / Grok chat).",
     )
     p.add_argument(
         "--provider",
         default=None,
-        choices=["openai", "xai"],
-        help="API provider: openai (default) or xai (Grok Voice).",
+        choices=["openai", "grok"],
+        help="API provider: openai (realtime) or grok (chat with STT).",
     )
     p.add_argument(
         "--model",
         default=None,
-        help="Override model. Examples: "
-             "OpenAI: gpt-realtime-mini, gpt-realtime, gpt-realtime-2; "
-             "xAI: grok-voice-think-fast-1.0.",
+        help="Override model. "
+             "OpenAI: gpt-realtime-mini, gpt-realtime, gpt-realtime-2. "
+             "Grok: grok-4-1-fast-non-reasoning, grok-4-1-fast-reasoning.",
     )
     return p.parse_args()
 
 
 def _resolve_provider_and_model(args: argparse.Namespace) -> tuple[str, str]:
-    provider = args.provider or os.environ.get("VOICE_PROVIDER", "openai")
+    provider = args.provider
+    model = args.model
+
+    # When only --model is given, infer provider from the prefix
+    # (gpt-* → openai, grok-* → grok). Lets `./run.sh --model X` and
+    # `./run.sh X` behave the same.
+    if model and not provider:
+        if model.startswith("gpt-"):
+            provider = "openai"
+        elif model.startswith("grok-"):
+            provider = "grok"
+
+    provider = provider or os.environ.get("VOICE_PROVIDER", "openai")
     if provider == "openai":
-        model = args.model or os.environ.get("OPENAI_REALTIME_MODEL", "gpt-realtime-mini")
-    elif provider == "xai":
-        model = args.model or os.environ.get("GROK_MODEL", "grok-voice-think-fast-1.0")
+        model = model or os.environ.get(
+            "OPENAI_REALTIME_MODEL", "gpt-realtime-mini"
+        )
+    elif provider == "grok":
+        model = model or os.environ.get(
+            "GROK_CHAT_MODEL", "grok-4-1-fast-non-reasoning"
+        )
     else:
         sys.exit(f"Unknown provider: {provider}")
     return provider, model
@@ -81,11 +98,13 @@ def _patch_wlan_ip_if_needed(reachy_host: str | None) -> None:
     WSClient.get_status = _patched
 
 
-def _create_bridge(mini: ReachyMini, provider: str, model: str) -> VoiceBridge:
+def _create_bridge(mini: ReachyMini, provider: str, model: str):
     if provider == "openai":
+        from .openai import OpenAIRealtimeBridge
         return OpenAIRealtimeBridge(mini, model=model)
-    if provider == "xai":
-        return GrokVoiceBridge(mini, model=model)
+    if provider == "grok":
+        from .grok import GrokChatBridge
+        return GrokChatBridge(mini, model=model)
     sys.exit(f"Unknown provider: {provider}")
 
 
@@ -111,8 +130,6 @@ def main() -> None:
             bridge = _create_bridge(mini, provider, model)
             bridge.run()
         finally:
-            # Return to neutral pose (do NOT goto_sleep — user wants the
-            # robot to stay awake / powered on).
             try:
                 mini.goto_target(
                     INIT_HEAD_POSE,
