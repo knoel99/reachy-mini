@@ -23,6 +23,7 @@ from reachy_mini.reachy_mini import (
     INIT_HEAD_POSE,
 )
 
+from ._log import log
 from .bridges import GrokVoiceBridge, OpenAIRealtimeBridge, VoiceBridge
 
 
@@ -105,7 +106,7 @@ def main() -> None:
         try:
             mini.wake_up()
         except Exception as e:
-            print(f"[robot] wake_up skipped: {e}", flush=True)
+            log(f"[robot] wake_up skipped: {e}")
         try:
             bridge = _create_bridge(mini, provider, model)
             bridge.run()
@@ -119,7 +120,7 @@ def main() -> None:
                     duration=1.0,
                 )
             except Exception as e:
-                print(f"[robot] goto neutral failed: {e}", flush=True)
+                log(f"[robot] goto neutral failed: {e}")
 
 
 if __name__ == "__main__":

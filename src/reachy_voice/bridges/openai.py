@@ -7,6 +7,7 @@ import sys
 from typing import TYPE_CHECKING
 
 from .base import VoiceBridge, REALTIME_RATE
+from .._log import log
 from ..tools import INSTRUCTIONS
 
 if TYPE_CHECKING:
@@ -97,7 +98,7 @@ class OpenAIRealtimeBridge(VoiceBridge):
         sys.stdout.flush()
     
     def handle_input_transcription(self, evt: dict) -> None:
-        print(f"\n[user] {evt.get('transcript', '').strip()}", flush=True)
+        log(f"[user] {evt.get('transcript', '').strip()}", lead="\n")
 
     def compute_cost(self, usage: dict) -> tuple[float, dict]:
         p = PRICING.get(self.model) or PRICING["gpt-realtime-mini"]
@@ -136,18 +137,16 @@ class OpenAIRealtimeBridge(VoiceBridge):
             if self.model in REASONING_MODELS else " (no reasoning support)"
         )
         if p is None:
-            print(
+            log(
                 f"[config] provider=openai model={self.model}{reasoning_str} "
-                "text-only output (pricing UNKNOWN — cost will be 0)",
-                flush=True,
+                "text-only output (pricing UNKNOWN — cost will be 0)"
             )
         else:
-            print(
+            log(
                 f"[config] provider=openai model={self.model}{reasoning_str} text-only output  "
                 f"prices /1M tok: text in ${p['text_input']*1e6:.2f} "
                 f"(cached ${p['text_input_cached']*1e6:.2f}) "
                 f"text out ${p['text_output']*1e6:.2f}  "
                 f"audio in ${p['audio_input']*1e6:.2f} "
-                f"(cached ${p['audio_input_cached']*1e6:.2f})",
-                flush=True,
+                f"(cached ${p['audio_input_cached']*1e6:.2f})"
             )

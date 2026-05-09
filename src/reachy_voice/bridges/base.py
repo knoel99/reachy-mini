@@ -18,6 +18,7 @@ import numpy as np
 import websocket
 from scipy.signal import resample_poly
 
+from .._log import log
 from ..emotions import EmotionPlayer
 from ..tools import LOOK_POSES, _make_head_pose, build_tools
 
@@ -142,11 +143,11 @@ class VoiceBridge(abc.ABC):
         if not self._response_active:
             return
         self._send({"type": "response.cancel"})
-        print("[barge-in] canceled in-flight response", flush=True)
-    
+        log("[barge-in] canceled in-flight response")
+
     # ---- WebSocket lifecycle ----
     def _on_open(self, ws: websocket.WebSocketApp) -> None:
-        print("[ws] connected", flush=True)
+        log("[ws] connected")
         ws.send(json.dumps({"type": "session.update", "session": self.get_session_config()}))
         self.media.start_playing()
         self.media.start_recording()
@@ -177,15 +178,15 @@ class VoiceBridge(abc.ABC):
             try:
                 self._ws.send(msg)  # type: ignore[union-attr]
             except Exception as e:
-                print(f"[ws] send failed: {e}", flush=True)
+                log(f"[ws] send failed: {e}")
                 return
-    
+
     def _on_error(self, ws: websocket.WebSocketApp, err: Exception) -> None:
-        print(f"[ws] error: {err}", flush=True)
-    
+        log(f"[ws] error: {err}")
+
     def _on_close(self, ws, code, msg) -> None:
-        print(f"[ws] closed code={code} msg={msg}", flush=True)
-        print(f"[cost] session total: ${self._cost_total:.4f} over {self._turns} turn(s)", flush=True)
+        log(f"[ws] closed code={code} msg={msg}")
+        log(f"[cost] session total: ${self._cost_total:.4f} over {self._turns} turn(s)")
         self._stop.set()
     
     # ---- Main message handler ----
@@ -238,7 +239,7 @@ class VoiceBridge(abc.ABC):
             err = evt.get("error") or {}
             code = err.get("code")
             if code not in ("response_cancel_not_active", "conversation_already_has_active_response"):
-                print(f"[ws] error: {err}", flush=True)
+                log(f"[ws] error: {err}")
     
     def _handle_response_done(self, evt: dict) -> None:
         """Handle response.done event."""
@@ -248,14 +249,18 @@ class VoiceBridge(abc.ABC):
             return
         self._last_done_response_id = rsp_id
 
-        usage = rsp.get("usage") or {}
+        # OpenAI nests `usage` inside `response`; xAI puts it at the
+        # event top level (with an empty `response.usage: {}`).
+        usage = evt.get("usage") or rsp.get("usage") or {}
         cost, br = self.compute_cost(usage)
         self._cost_total += cost
         self._turns += 1
-        print(
-            f"[bot] response.done cost=${cost:.4f} "
-            f"cumul=${self._cost_total:.4f} (turn #{self._turns})",
-            flush=True,
+        log(
+            f"[bot] response.done cost=${cost:.4f} cumul=${self._cost_total:.4f} "
+            f"in=txt:{br['text_in']} cached:{br['text_in_cached']} "
+            f"audio:{br['audio_in']} audio_cached:{br['audio_in_cached']} "
+            f"out=txt:{br['text_out']} audio:{br['audio_out']} "
+            f"(turn #{self._turns})"
         )
 
         needs_followup = self._needs_followup_response
@@ -273,10 +278,13 @@ class VoiceBridge(abc.ABC):
         def _wrapper() -> None:
             if prev is not None and prev.is_alive():
                 prev.join(timeout=10.0)
+            t0 = time.monotonic()
             try:
                 fn()
             except Exception as e:
-                print(f"[move] failed: {e}", flush=True)
+                log(f"[move] failed: {e}")
+                return
+            log(f"[move] done in {time.monotonic() - t0:.2f}s")
         
         t = threading.Thread(target=_wrapper, daemon=True)
         self._move_thread = t
@@ -291,7 +299,7 @@ class VoiceBridge(abc.ABC):
             args = json.loads(args_raw)
         except json.JSONDecodeError:
             args = {}
-        print(f"[tool] {name}({args})", flush=True)
+        log(f"[tool] {name}({args})")
         
         if name == "play_emotion":
             emo = args.get("name", "")
@@ -354,9 +362,9 @@ class VoiceBridge(abc.ABC):
                 
                 self.mini.goto_target(pose, antennas=antennas, duration=duration)
             except Exception as e:
-                print(f"[seq] step failed: {e}", flush=True)
+                log(f"[seq] step failed: {e}")
                 return
-        
+
         # back to neutral
         try:
             self.mini.goto_target(
@@ -365,7 +373,7 @@ class VoiceBridge(abc.ABC):
                 duration=0.5,
             )
         except Exception as e:
-            print(f"[seq] return to neutral failed: {e}", flush=True)
+            log(f"[seq] return to neutral failed: {e}")
     
     # ---- Run method ----
     def run(self) -> None:

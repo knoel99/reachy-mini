@@ -10,6 +10,8 @@ import numpy as np
 from scipy.io import wavfile
 from scipy.signal import resample_poly
 
+from ._log import log
+
 if TYPE_CHECKING:
     from reachy_mini import ReachyMini
 
@@ -45,7 +47,7 @@ class EmotionPlayer:
             try:
                 move = self.library.get(name)
             except Exception as e:
-                print(f"[emotion] preload '{name}': get failed: {e}", flush=True)
+                log(f"[emotion] preload '{name}': get failed: {e}")
                 continue
 
             path = getattr(move, "sound_path", None)
@@ -56,12 +58,12 @@ class EmotionPlayer:
             try:
                 src_rate, data = wavfile.read(str(path))
             except Exception as e:
-                print(f"[emotion] preload '{name}': read failed: {e}", flush=True)
+                log(f"[emotion] preload '{name}': read failed: {e}")
                 continue
 
             samples = self._to_float32_mono(data)
             if samples is None:
-                print(f"[emotion] preload '{name}': unsupported dtype {data.dtype}", flush=True)
+                log(f"[emotion] preload '{name}': unsupported dtype {data.dtype}")
                 continue
 
             if src_rate != self._target_rate:
@@ -73,11 +75,10 @@ class EmotionPlayer:
             sounds[name] = samples
 
         total_mb = sum(s.nbytes for s in sounds.values()) / 1e6
-        print(
+        log(
             f"[emotion] preloaded {len(sounds)} sounds "
             f"({total_mb:.1f} MB @ {self._target_rate} Hz), "
-            f"{len(skipped)} silent",
-            flush=True,
+            f"{len(skipped)} silent"
         )
         return sounds
 
@@ -110,29 +111,30 @@ class EmotionPlayer:
             move = self.library.get(name)
         except Exception as e:
             self._busy.release()
-            print(f"[emotion] unknown: {name} ({e})", flush=True)
+            log(f"[emotion] unknown: {name} ({e})")
             return False
         if move is None:
             self._busy.release()
-            print(f"[emotion] unknown: {name}", flush=True)
+            log(f"[emotion] unknown: {name}")
             return False
 
         self._last_t = now
         samples = self._sounds.get(name)
 
         def _run() -> None:
+            t0 = time.monotonic()
             try:
                 if samples is not None:
                     try:
                         self.mini.media.push_audio_sample(samples)
                     except Exception as e:
-                        print(f"[emotion] push_audio_sample '{name}' failed: {e}",
-                              flush=True)
+                        log(f"[emotion] push_audio_sample '{name}' failed: {e}")
                 self.mini.play_move(move, initial_goto_duration=0.5)
             except Exception as e:
-                print(f"[emotion] play '{name}' failed: {e}", flush=True)
+                log(f"[emotion] play '{name}' failed: {e}")
             finally:
                 self._busy.release()
+            log(f"[emotion] '{name}' done in {time.monotonic() - t0:.2f}s")
 
         threading.Thread(target=_run, daemon=True).start()
         return True

@@ -39,7 +39,7 @@ case "${1:-}" in
   mini)  EXTRA+=(--provider openai --model gpt-realtime-mini); shift ;;
   full)  EXTRA+=(--provider openai --model gpt-realtime);      shift ;;
   full2) EXTRA+=(--provider openai --model gpt-realtime-2);    shift ;;
-  grok)  EXTRA+=(--provider xai --model grok-voice-think-fast-1.0); shift ;;
+  grok)  EXTRA+=(--provider xai --model grok-voice-think-fast-1.0); export GROK_DEBUG_USAGE=1; shift ;;
   openai|xai)
     EXTRA+=(--provider "$1")
     shift
