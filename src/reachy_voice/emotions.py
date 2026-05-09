@@ -14,9 +14,11 @@ re-injecting the robot's own audio as a user utterance.
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
+from pathlib import Path
 
 import numpy as np
+from reachy_mini.motion.move import Move
 from scipy.io import wavfile
 from scipy.signal import resample_poly
 
@@ -30,6 +32,32 @@ if TYPE_CHECKING:
 # duration, to absorb media-pipeline latency between push and audio
 # actually leaving the speaker.
 _SPEAKING_PAD_S = 0.5
+
+# When the bundled move and the emotion's sound differ by more than
+# this, time-stretch the move so its choreography spans the audio.
+_STRETCH_EPSILON_S = 0.05
+
+
+class _StretchedMove(Move):
+    """Wraps a Move so its choreography fills `target_duration` seconds."""
+
+    def __init__(self, base: Move, target_duration: float) -> None:
+        self._base = base
+        self._target = max(0.1, float(target_duration))
+        self._base_dur = max(1e-3, float(base.duration))
+
+    @property
+    def duration(self) -> float:
+        return self._target
+
+    @property
+    def sound_path(self) -> Optional[Path]:
+        return None  # audio is pushed separately by EmotionPlayer
+
+    def evaluate(self, t):  # noqa: ANN001 — inherits abstract signature
+        scale = self._base_dur / self._target
+        u = min(t * scale, self._base_dur - 1e-3)
+        return self._base.evaluate(u)
 
 
 class EmotionPlayer:
@@ -133,6 +161,12 @@ class EmotionPlayer:
             len(samples) / self._target_rate if samples is not None else 0.0
         )
 
+        # Time-stretch the bundled choreography so its duration matches
+        # the audio. Without this the head freezes mid-sound (move
+        # shorter than audio) or finishes in silence (move longer).
+        if sound_dur > 0 and abs(move.duration - sound_dur) > _STRETCH_EPSILON_S:
+            move = _StretchedMove(move, sound_dur)
+
         t0 = time.monotonic()
         # Mark the speaker as busy *before* pushing so the mic loop
         # doesn't capture the very first samples back as user input.
@@ -144,7 +178,10 @@ class EmotionPlayer:
                     self.mini.media.push_audio_sample(samples)
                 except Exception as e:
                     log(f"[emotion] push_audio_sample '{name}' failed: {e}")
-            self.mini.play_move(move, initial_goto_duration=0.5)
+            # sound=False because we already pushed the audio above;
+            # otherwise play_move would re-play move.sound_path through
+            # the backend and the sound would overlap with itself.
+            self.mini.play_move(move, initial_goto_duration=0.5, sound=False)
             # Hold until the sound has actually played out — even if the
             # bundled move was shorter.
             rem = self._speaking_until - time.monotonic()
