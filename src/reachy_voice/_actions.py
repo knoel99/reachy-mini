@@ -135,7 +135,14 @@ class RobotActions:
         except Exception as e:
             log(f"[vision] query failed: {e}")
             return f"error:{e}"
-        return res.text or "no_answer"
+        text = (res.text or "").strip()
+        if not text:
+            return "no_answer"
+        # Cap to keep the model's followup context tight: vision answers
+        # can run long even with a "court" system instruction.
+        if len(text) > 300:
+            text = text[:297] + "..."
+        return text
 
     def _handle_find_object(self, target: str) -> str:
         if self._vision is None or self._camera is None:

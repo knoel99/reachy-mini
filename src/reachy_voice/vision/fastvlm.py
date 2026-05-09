@@ -2,8 +2,8 @@
 
 The model itself runs on a beefy GPU (typically Colab — see
 ``colab/fastvlm_7b_server.ipynb``) which exposes a ``/query`` endpoint
-via Gradio's public share URL. This client posts the JPEG-encoded
-frame + question and returns the answer.
+via a cloudflared quick tunnel (``*.trycloudflare.com``). This client
+posts the JPEG-encoded frame + question and returns the answer.
 
 Why HTTP / why Colab: FastVLM-7B is ~14 GB in fp16, far too heavy for
 the Pi or a typical laptop CPU. Apple's Core ML build is Apple Silicon
@@ -12,7 +12,7 @@ Colab T4/L4/A100 is the path of least resistance for "highest config"
 (7B) without any local hardware investment.
 
 Set ``FASTVLM_URL`` to the base URL printed by the Colab notebook
-(e.g. ``https://abc123.gradio.live``). FastVLM does not natively
+(e.g. ``https://abc123.trycloudflare.com``). FastVLM does not natively
 expose detect/point, so those fall back to the base class no-op.
 """
 
