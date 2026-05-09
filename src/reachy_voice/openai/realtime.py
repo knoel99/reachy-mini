@@ -56,7 +56,7 @@ PRICING = {
     },
 }
 
-REASONING_MODELS = {"gpt-realtime", "gpt-realtime-2"}
+REASONING_MODELS = {"gpt-realtime-2"}
 REASONING_EFFORT = os.environ.get("OPENAI_REASONING_EFFORT", "medium")
 
 
