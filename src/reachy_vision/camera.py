@@ -1,13 +1,4 @@
-"""Camera frame buffer thread.
-
-Pulls frames from ``mini.media.get_frame()`` at a low fixed rate and
-keeps the latest one available behind a lock so that on-demand vision
-tool calls can grab a fresh frame without blocking on an actual
-capture. We don't do head-tracking here — that's intentionally left to
-``reachy_mini_toolbox`` if you want it later. This worker only exists
-to keep one warm frame ready for the LLM-triggered ``look_and_describe``
-and ``find_object`` tools.
-"""
+"""Background camera capture exposing the latest BGR frame."""
 
 from __future__ import annotations
 
@@ -16,21 +7,18 @@ import time
 from typing import TYPE_CHECKING
 
 import numpy as np
-from numpy.typing import NDArray
 
-from .._log import log
+from reachy_voice._log import log
 
 if TYPE_CHECKING:
     from reachy_mini import ReachyMini
 
 
-class CameraWorker:
-    """Thread keeping the latest BGR frame in a buffer."""
-
+class Camera:
     def __init__(self, mini: ReachyMini, fps: float = 5.0) -> None:
         self._mini = mini
         self._period = 1.0 / max(0.5, fps)
-        self._latest: NDArray[np.uint8] | None = None
+        self._frame: np.ndarray | None = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -51,12 +39,12 @@ class CameraWorker:
             self._thread = None
         log(f"[camera] worker stopped (captured {self._frames} frame(s))")
 
-    def get_latest(self) -> NDArray[np.uint8] | None:
-        """Thread-safe latest-frame snapshot (returns a copy, or None)."""
+    def get_latest(self) -> np.ndarray | None:
         with self._lock:
-            if self._latest is None:
-                return None
-            return self._latest.copy()
+            return None if self._frame is None else self._frame.copy()
+
+    def is_running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
 
     def _loop(self) -> None:
         while not self._stop.is_set():
@@ -68,7 +56,7 @@ class CameraWorker:
                 frame = None
             if frame is not None:
                 with self._lock:
-                    self._latest = frame
+                    self._frame = frame
                 self._frames += 1
             elapsed = time.monotonic() - t0
             time.sleep(max(0.0, self._period - elapsed))

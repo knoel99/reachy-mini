@@ -15,24 +15,19 @@ reachy-mini/
 ├── docs/DEPLOY_ON_ROBOT.md       # déploiement systemd sur le Pi
 ├── scripts/export_emotion_sounds.py
 ├── colab/fastvlm_7b_server.ipynb # serveur FastVLM-7B (Colab GPU)
-└── src/reachy_voice/
-    ├── __main__.py               # python -m reachy_voice
-    ├── _actions.py               # RobotActions : dispatch tool → robot (partagé)
-    ├── _log.py                   # log() timestampé avec delta
-    ├── emotions.py               # EmotionPlayer (preload + push_audio_sample)
-    ├── tools.py                  # INSTRUCTIONS, LOOK_POSES, build_tools
-    ├── openai/                   # provider OpenAI
-    │   └── realtime.py           # OpenAIRealtimeBridge (WebSocket)
-    ├── grok/                     # provider Grok
-    │   ├── vad.py                # webrtcvad : segmente les utterances
-    │   ├── stt.py                # POST /v1/stt (xAI Speech-to-Text)
-    │   └── chat.py               # GrokChatBridge : orchestrateur
-    └── vision/                   # backends image-to-text optionnels
-        ├── base.py               # VisionBackend ABC + dataclasses
-        ├── moondream.py          # Moondream cloud / local SDK
-        ├── fastvlm.py            # FastVLM-7B client HTTP (serveur Colab)
-        ├── camera_worker.py      # buffer dernière frame (thread)
-        └── factory.py            # dispatch via VISION_BACKEND
+├── src/reachy_voice/             # pipeline voix
+│   ├── __main__.py
+│   ├── _actions.py               # RobotActions : dispatch tool → robot
+│   ├── _log.py
+│   ├── emotions.py               # EmotionPlayer (preload + push_audio_sample)
+│   ├── tools.py                  # build_tools, build_instructions, LOOK_POSES
+│   ├── openai/realtime.py        # bridge WebSocket
+│   └── grok/{vad,stt,chat}.py    # mic → VAD → STT → chat-with-tools
+└── src/reachy_vision/            # package vision dédié (optionnel)
+    ├── camera.py                 # Camera : dernière frame BGR sous lock
+    ├── moondream.py              # Moondream : caption() + point()
+    ├── fastvlm.py                # FastVLM : caption() (HTTP vers Colab)
+    └── preview.py                # Preview : MJPEG :5050 + overlays debug
 ```
 
 Installation : `pip install -e .` (voir [INSTALL.md](./INSTALL.md)).
@@ -56,7 +51,14 @@ FASTVLM_URL=https://xxxx.trycloudflare.com
 Deux outils sont alors exposés au LLM :
 - `look_and_describe(question)` — capture une frame et pose une question
 - `find_object(target)` — localise un objet et oriente la tête
-  (Moondream uniquement — utilise `point()`/`detect()` natifs)
+  (Moondream uniquement — utilise `point()` natif)
+
+Une preview web de debug tourne sur `http://localhost:5050` dès que le
+backend vision démarre. Elle stream le MJPEG en direct et overlaye la
+dernière caption + le crosshair du dernier `find_object` (chaque
+overlay fade après 5 s). Désactiver avec `VISION_PREVIEW=0`. La
+preview bind sur `0.0.0.0` — firewall ton LAN ou désactive-la en
+prod sur le Pi.
 
 ## Les deux pipelines
 
