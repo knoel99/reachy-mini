@@ -1,8 +1,0 @@
-# Reproducible from `python scripts/export_emotion_sounds.py tools/humming/data/sources`
-data/sources/
-# Reproducible from `python tools/humming/synthesize.py`
-data/outputs/
-# data/samples/ IS committed: curated seed, kept so synthesize.py is
-# runnable without re-curating.
-__pycache__/
-*.pyc

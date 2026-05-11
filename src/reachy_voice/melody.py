@@ -31,7 +31,7 @@ _SPEAKING_PAD_S = 0.5
 
 _MAX_NOTES = 64
 _MIN_DUR_S = 0.05
-_MAX_DUR_S = 2.0
+_MAX_DUR_S = 4.0
 _MIN_BPM = 30.0
 _MAX_BPM = 300.0
 _MIN_MIDI = 33   # A1  (~55 Hz)
@@ -119,8 +119,8 @@ class MelodyPlayer:
         rate = -1
         try:
             rate = mini.media.get_output_audio_samplerate()
-        except Exception:
-            pass
+        except Exception as e:
+            log(f"[melody] get_output_audio_samplerate failed: {e}")
         self._target_rate = rate if rate and rate > 0 else self.DEFAULT_TARGET_RATE
 
     def is_speaking(self) -> bool:

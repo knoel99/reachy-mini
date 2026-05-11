@@ -99,8 +99,7 @@ refus passe par le mouvement et le son.
   `move_sequence` avec ≥ 6 keyframes pour que ce soit lisible.
 - Ne combine pas `play_melody` avec `play_emotion` ou
   `move_sequence` (le même haut-parleur ET les mêmes moteurs sont
-  occupés ; `play_melody` pilote déjà la danse rythmique). Les
-
+  occupés ; `play_melody` pilote déjà la danse rythmique).
 - Ne réponds JAMAIS « je ne peux pas bouger » — tu peux toujours.
   Si la demande est complexe, planifie-la dans `move_sequence`.
 """
