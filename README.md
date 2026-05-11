@@ -14,22 +14,56 @@ reachy-mini/
 ├── run.sh                        # loads .env, GST_PLUGIN_PATH, LD_PRELOAD
 ├── docs/DEPLOY_ON_ROBOT.md       # systemd deployment on the Pi
 ├── scripts/export_emotion_sounds.py
-└── src/reachy_voice/
-    ├── __main__.py               # python -m reachy_voice
-    ├── _actions.py               # RobotActions: tool → robot dispatch (shared)
-    ├── _log.py                   # log() with timestamp + delta
-    ├── emotions.py               # EmotionPlayer (preload + push_audio_sample)
-    ├── tools.py                  # INSTRUCTIONS, LOOK_POSES, build_tools
-    ├── openai/                   # OpenAI provider
-    │   └── realtime.py           # OpenAIRealtimeBridge (WebSocket)
-    └── grok/                     # Grok provider
-        ├── vad.py                # webrtcvad: utterance segmentation
-        ├── stt.py                # POST /v1/stt (xAI Speech-to-Text)
-        └── chat.py               # GrokChatBridge: orchestrator
+├── colab/fastvlm_7b_server.ipynb # FastVLM-7B server (Colab GPU)
+├── src/reachy_voice/             # voice pipeline
+│   ├── __main__.py               # python -m reachy_voice
+│   ├── _actions.py               # RobotActions: tool → robot dispatch (shared)
+│   ├── _log.py                   # log() with timestamp + delta
+│   ├── emotions.py               # EmotionPlayer (preload + push_audio_sample)
+│   ├── melody.py                 # MelodyPlayer (sine-wave melody synth)
+│   ├── tools.py                  # INSTRUCTIONS, LOOK_POSES, build_tools
+│   ├── openai/                   # OpenAI provider
+│   │   └── realtime.py           # OpenAIRealtimeBridge (WebSocket)
+│   └── grok/                     # Grok provider
+│       ├── vad.py                # webrtcvad: utterance segmentation
+│       ├── stt.py                # POST /v1/stt (xAI Speech-to-Text)
+│       └── chat.py               # GrokChatBridge: orchestrator
+└── src/reachy_vision/            # vision package (optional)
+    ├── camera.py                 # Camera: latest BGR frame under lock
+    ├── moondream.py              # Moondream: caption() + point()
+    ├── fastvlm.py                # FastVLM: caption() (HTTP to Colab)
+    └── preview.py                # Preview: MJPEG :5050 + debug overlays
 ```
 
 Install: `pip install -e .` (see [INSTALL.md](./INSTALL.md)).
+For vision: `pip install -e '.[vision]'` (adds Moondream).
 Run: `./run.sh <model>`, `python -m reachy_voice`, or `reachy-voice`.
+
+### Enabling vision (optional)
+
+Copy `.env.example` to `.env` then configure a backend:
+
+```bash
+# Option A — Moondream cloud (recommended to start)
+VISION_BACKEND=moondream
+MOONDREAM_API_KEY=...    # https://moondream.ai/c/account/api-keys
+
+# Option B — FastVLM-7B served by Colab (see colab/fastvlm_7b_server.ipynb)
+VISION_BACKEND=fastvlm
+FASTVLM_URL=https://xxxx.trycloudflare.com
+```
+
+Two extra tools are then exposed to the LLM:
+- `look_and_describe(question)` — capture a frame and ask a question
+- `find_object(target)` — locate an object and aim the head
+  (Moondream only — uses native `point()`)
+
+A debug web preview runs at `http://localhost:5050` as soon as the
+vision backend starts. It streams live MJPEG and overlays the latest
+caption + the crosshair of the most recent `find_object` (each overlay
+fades after 5 s). Disable with `VISION_PREVIEW=0`. The preview binds on
+`127.0.0.1` by default (localhost only); set `VISION_PREVIEW_HOST=0.0.0.0`
+to expose it on the LAN (firewall first).
 
 ## The two pipelines
 

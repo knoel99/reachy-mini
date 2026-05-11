@@ -24,7 +24,7 @@ from scipy.signal import resample_poly
 
 from .._actions import RobotActions
 from .._log import log
-from ..tools import INSTRUCTIONS, to_chat_tools
+from ..tools import build_instructions, to_chat_tools
 from .stt import XaiSTT
 from .vad import SAMPLE_RATE, UtteranceDetector
 
@@ -73,7 +73,10 @@ class GrokChatBridge:
         # Native context: keep the full conversation. grok-4-1-fast has
         # ample headroom for a robot session; we don't truncate.
         self.messages: list[dict] = [
-            {"role": "system", "content": INSTRUCTIONS},
+            {"role": "system", "content": build_instructions(
+                vision_enabled=self.actions.vision_enabled,
+                vision_grounding=self.actions.vision_grounding,
+            )},
         ]
 
         self._stop = threading.Event()
@@ -223,6 +226,7 @@ class GrokChatBridge:
         self._print_config()
         self.media.start_playing()
         self.media.start_recording()
+        self.actions.start_camera()
         threading.Thread(target=self._mic_loop, daemon=True).start()
 
         def _sigint(_sig, _frm):
@@ -234,6 +238,7 @@ class GrokChatBridge:
                 time.sleep(0.2)
         finally:
             self._stop.set()
+            self.actions.stop_camera()
             try:
                 self.media.stop_recording()
             except Exception:

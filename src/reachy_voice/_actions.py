@@ -9,6 +9,7 @@ async worker so two `move_sequence` calls never collide.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from typing import TYPE_CHECKING
@@ -20,10 +21,18 @@ from .tools import LOOK_POSES, _make_head_pose, build_tools
 
 if TYPE_CHECKING:
     from reachy_mini import ReachyMini
+    from reachy_vision import Camera, FastVLM, Moondream, Preview
 
 
 class RobotActions:
-    """Maps LLM tool calls to robot motion + emotion playback."""
+    """Maps LLM tool calls to robot motion + emotion playback.
+
+    Optional vision backend (Moondream / FastVLM) is wired in here so
+    every provider bridge gets vision tools for free — bridges only
+    need to call :meth:`start_camera` / :meth:`stop_camera` around
+    their session lifecycle and propagate :attr:`vision_enabled` /
+    :attr:`vision_grounding` to their system prompt builder.
+    """
 
     def __init__(self, mini: ReachyMini) -> None:
         self.mini = mini
@@ -33,8 +42,85 @@ class RobotActions:
             RecordedMoves("pollen-robotics/reachy-mini-emotions-library"),
         )
         self._melody = MelodyPlayer(self.mini)
-        self.tools = build_tools(sorted(self._emotions.library.list_moves()))
+
+        self._vision: Moondream | FastVLM | None = None
+        self._camera: Camera | None = None
+        self._preview: Preview | None = None
+        self._init_vision()
+
+        self.vision_enabled = self._vision is not None
+        self.vision_grounding = bool(self._vision and self._vision.supports_grounding)
+
+        self.tools = build_tools(
+            sorted(self._emotions.library.list_moves()),
+            vision_enabled=self.vision_enabled,
+            vision_grounding=self.vision_grounding,
+        )
         self._move_thread: threading.Thread | None = None
+
+    def _init_vision(self) -> None:
+        backend = os.environ.get("VISION_BACKEND", "").strip().lower()
+        if not backend or backend == "none":
+            return
+        try:
+            from reachy_vision import Camera, FastVLM, Moondream, Preview
+        except ImportError as e:
+            log(f"[vision] reachy_vision import failed, vision disabled: {e}")
+            return
+        try:
+            if backend == "moondream":
+                api_key = os.environ.get("MOONDREAM_API_KEY", "").strip() or None
+                local = os.environ.get("MOONDREAM_LOCAL", "").lower() in ("1", "true", "yes")
+                self._vision = Moondream(api_key=api_key, local=local)
+            elif backend == "fastvlm":
+                url = os.environ.get("FASTVLM_URL", "").strip()
+                timeout = float(os.environ.get("FASTVLM_TIMEOUT", "30"))
+                self._vision = FastVLM(base_url=url, timeout=timeout)
+            else:
+                log(f"[vision] unknown VISION_BACKEND={backend!r}, vision disabled")
+                return
+        except Exception as e:
+            log(f"[vision] backend init failed, vision disabled: {e}")
+            self._vision = None
+            return
+        self._camera = Camera(self.mini, fps=5.0)
+        if os.environ.get("VISION_PREVIEW", "1") != "0":
+            try:
+                self._preview = Preview(
+                    self._camera,
+                    host=os.environ.get("VISION_PREVIEW_HOST", "127.0.0.1"),
+                    port=int(os.environ.get("VISION_PREVIEW_PORT", "5050")),
+                )
+            except Exception as e:
+                log(f"[preview] init failed, preview disabled: {e}")
+                self._preview = None
+
+    def start_camera(self) -> None:
+        if self._camera is not None:
+            self._camera.start()
+        if self._preview is not None:
+            try:
+                self._preview.start()
+            except Exception as e:
+                log(f"[preview] start failed: {e}")
+                self._preview = None
+
+    def stop_camera(self) -> None:
+        if self._preview is not None:
+            try:
+                self._preview.stop()
+            except Exception as e:
+                log(f"[preview] stop failed: {e}")
+        if self._camera is not None:
+            try:
+                self._camera.stop()
+            except Exception as e:
+                log(f"[camera] stop failed: {e}")
+        if self._vision is not None and hasattr(self._vision, "close"):
+            try:
+                self._vision.close()
+            except Exception:
+                pass
 
     def is_speaking(self) -> bool:
         """True while an emotion or melody is still playing."""
@@ -76,7 +162,69 @@ class RobotActions:
             self._run_async(lambda: self._melody.play(notes, tempo))
             return f"queued:{len(notes)}_notes"
 
+        if name == "look_and_describe":
+            return self._handle_look_and_describe(args.get("question", ""))
+
+        if name == "find_object":
+            return self._handle_find_object(args.get("target", ""))
+
         return f"unknown_tool:{name}"
+
+    def _handle_look_and_describe(self, question: str) -> str:
+        if self._vision is None or self._camera is None:
+            return "vision_not_enabled"
+        question = (question or "").strip()
+        if not question:
+            return "empty_question"
+        frame = self._camera.get_latest()
+        if frame is None:
+            return "no_frame_available"
+        try:
+            text = self._vision.caption(frame, question)
+        except Exception as e:
+            log(f"[vision] caption failed: {e}")
+            return f"error:{e}"
+        if not text:
+            return "no_answer"
+        if len(text) > 300:
+            text = text[:297] + "..."
+        if self._preview is not None:
+            self._preview.register_caption(question, text)
+        return text
+
+    def _handle_find_object(self, target: str) -> str:
+        if self._vision is None or self._camera is None:
+            return "vision_not_enabled"
+        if not self._vision.supports_grounding:
+            return "grounding_not_supported"
+        target = (target or "").strip()
+        if not target:
+            return "empty_target"
+        frame = self._camera.get_latest()
+        if frame is None:
+            return "no_frame_available"
+        try:
+            points = self._vision.point(frame, target)
+        except Exception as e:
+            log(f"[vision] point failed: {e}")
+            return f"error:{e}"
+        if not points:
+            return f"not_found:{target}"
+        cx, cy = points[0]
+        if self._preview is not None:
+            self._preview.register_detection(target, [(cx, cy)])
+        h, w, _ = frame.shape
+        px, py = cx * w, cy * h
+
+        def _aim() -> None:
+            try:
+                pose = self.mini.look_at_image(px, py, duration=0.0, perform_movement=False)
+                self.mini.goto_target(pose, duration=0.6)
+            except Exception as e:
+                log(f"[vision] look_at_image failed: {e}")
+
+        self._run_async(_aim)
+        return f"found:{target}@({cx:.2f},{cy:.2f})"
 
     def _run_async(self, fn) -> None:
         """Run fn off the caller thread, serialised after the previous move."""

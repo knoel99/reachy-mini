@@ -19,6 +19,14 @@ dependencies = [
     "webrtcvad-wheels",
 ]
 
+[project.optional-dependencies]
+vision = [
+    "moondream>=0.1.0",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "Pillow>=10.0",
+]
+
 [project.scripts]
 reachy-voice = "reachy_voice.__main__:main"
 

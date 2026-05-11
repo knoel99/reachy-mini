@@ -18,7 +18,7 @@ from scipy.signal import resample_poly
 
 from .._actions import RobotActions
 from .._log import log
-from ..tools import INSTRUCTIONS
+from ..tools import build_instructions
 
 if TYPE_CHECKING:
     from reachy_mini import ReachyMini
@@ -64,6 +64,11 @@ REASONING_EFFORT = os.environ.get("OPENAI_REASONING_EFFORT", "medium")
 # moment, which VAD would otherwise commit as a phantom user turn.
 _MIC_GRACE_S = 1.2
 
+# Tools whose execute() may take >100ms and must NOT run on the WS
+# reader thread (otherwise barge-in / response.done are stalled).
+# Vision queries take ~0.5s (Moondream cloud) up to 30s (FastVLM).
+_SLOW_TOOLS = frozenset({"look_and_describe", "find_object"})
+
 
 class OpenAIRealtimeBridge:
     """Bidirectional realtime bridge: mic → OpenAI Realtime → tool calls."""
@@ -89,6 +94,14 @@ class OpenAIRealtimeBridge:
         self._response_active = False
         self._last_done_response_id: str | None = None
         self._mic_open_at: float = 0.0
+        self._needs_followup_response = False
+
+        # Coordinates the WS reader thread with off-thread slow-tool
+        # workers: the worker decrements _pending_vision in its finally
+        # and may trigger response.create itself when it drains, while
+        # response.done defers if any vision call is still in flight.
+        self._vision_lock = threading.Lock()
+        self._pending_vision = 0
 
         self._cost_total = 0.0
         self._turns = 0
@@ -117,7 +130,10 @@ class OpenAIRealtimeBridge:
         session = {
             "type": "realtime",
             "output_modalities": ["text"],
-            "instructions": INSTRUCTIONS,
+            "instructions": build_instructions(
+                vision_enabled=self.actions.vision_enabled,
+                vision_grounding=self.actions.vision_grounding,
+            ),
             "audio": {
                 "input": {
                     "format": {"type": "audio/pcm", "rate": REALTIME_RATE},
@@ -192,6 +208,7 @@ class OpenAIRealtimeBridge:
         ws.send(json.dumps({"type": "session.update", "session": self._session_config()}))
         self.media.start_playing()
         self.media.start_recording()
+        self.actions.start_camera()
         self._mic_open_at = time.monotonic()
         threading.Thread(target=self._mic_loop, daemon=True).start()
 
@@ -243,6 +260,7 @@ class OpenAIRealtimeBridge:
         log(f"[ws] closed code={code} msg={msg}")
         log(f"[cost] session total: ${self._cost_total:.4f} over {self._turns} turn(s)")
         self._stop.set()
+        self.actions.stop_camera()
 
     # ---- barge-in ----
     def _barge_in(self) -> None:
@@ -294,6 +312,20 @@ class OpenAIRealtimeBridge:
         except json.JSONDecodeError:
             args = {}
         log(f"[tool] {name}({args})")
+
+        if name in _SLOW_TOOLS:
+            # Hand off to a worker so the WS reader stays free for
+            # barge-in / response.done. The worker manages the
+            # function_call_output + response.create handshake itself.
+            with self._vision_lock:
+                self._pending_vision += 1
+            threading.Thread(
+                target=self._dispatch_slow_tool,
+                args=(name, call_id, args),
+                daemon=True,
+            ).start()
+            return
+
         result = self.actions.execute(name, args)
         # Provide the function result so the conversation history is
         # consistent, but do NOT trigger a follow-up `response.create`.
@@ -308,6 +340,41 @@ class OpenAIRealtimeBridge:
                 "output": json.dumps({"status": result}),
             },
         })
+
+    def _dispatch_slow_tool(self, name: str, call_id: str, args: dict) -> None:
+        try:
+            try:
+                result = self.actions.execute(name, args)
+            except Exception as e:
+                # Never leave the model with an orphan function_call:
+                # always send a function_call_output, even on crash.
+                log(f"[tool] {name} crashed: {e}")
+                result = f"error:{e}"
+            self._send({
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": json.dumps({"status": result}),
+                },
+            })
+        finally:
+            send_create = False
+            with self._vision_lock:
+                self._pending_vision -= 1
+                if self._pending_vision == 0:
+                    # Two cases when we drain:
+                    #   - response.done already fired (response_active
+                    #     is False): nobody else will ask for the
+                    #     followup, drive response.create here.
+                    #   - response is still active: leave a flag so
+                    #     response.done picks it up.
+                    if not self._response_active:
+                        send_create = True
+                    else:
+                        self._needs_followup_response = True
+            if send_create:
+                self._send({"type": "response.create"})
 
     def _handle_response_done(self, evt: dict) -> None:
         rsp = evt.get("response") or {}
@@ -328,7 +395,17 @@ class OpenAIRealtimeBridge:
             f"(turn #{self._turns})"
         )
 
-        self._response_active = False
+        needs_followup = False
+        with self._vision_lock:
+            self._response_active = False
+            if self._pending_vision == 0:
+                needs_followup = self._needs_followup_response
+                self._needs_followup_response = False
+            # else: a slow-tool worker will trigger response.create
+            # itself when it drains (it'll see response_active=False).
+
+        if needs_followup:
+            self._send({"type": "response.create"})
 
     # ---- run ----
     def run(self) -> None:
