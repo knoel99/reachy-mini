@@ -84,7 +84,10 @@ class RobotActions:
 
         def _wrapper() -> None:
             if prev is not None and prev.is_alive():
-                prev.join(timeout=10.0)
+                # Long enough to outlast a worst-case play_melody buffer
+                # (64 notes × 4 s) so back-to-back audio actions don't
+                # overlap on the speaker.
+                prev.join(timeout=120.0)
             t0 = time.monotonic()
             try:
                 fn()
