@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 import pyworld as pw
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from audio_io import load_mono, save_wav  # noqa: E402
 from config import SOURCES_DIR, SAMPLES_DIR, TARGET_RATE  # noqa: E402
 

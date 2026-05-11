@@ -1,14 +1,28 @@
-"""Shared per-note ADSR envelope."""
+"""Per-note ADSR envelope, applied to the WORLD-synthesised buffer.
+
+Aligned with the values the sine path used to use, so notes have the
+same perceived attack/release shape regardless of the underlying
+synthesis.
+"""
 from __future__ import annotations
 
 import numpy as np
 
 
-def adsr(n: int, rate: int,
-         attack_s: float = 0.020,
-         decay_s: float = 0.050,
-         sustain_lvl: float = 0.75,
-         release_s: float = 0.100) -> np.ndarray:
+ATTACK_S = 0.015
+DECAY_S = 0.050
+SUSTAIN_LVL = 0.70
+RELEASE_S = 0.080
+
+
+def adsr(
+    n: int,
+    rate: int,
+    attack_s: float = ATTACK_S,
+    decay_s: float = DECAY_S,
+    sustain_lvl: float = SUSTAIN_LVL,
+    release_s: float = RELEASE_S,
+) -> np.ndarray:
     a = min(int(rate * attack_s), n // 4)
     d = min(int(rate * decay_s), max(0, (n - a) // 3))
     r = min(int(rate * release_s), max(0, n - a - d))

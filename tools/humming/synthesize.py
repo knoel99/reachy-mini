@@ -17,12 +17,12 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from reachy_voice.humming import pitch_to_hz, world_vocoder
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from audio_io import load_mono, save_wav  # noqa: E402
 from config import OUTPUTS_DIR, SAMPLES_DIR  # noqa: E402
 from melodies import ALL_MELODIES  # noqa: E402
-from methods import world_vocoder  # noqa: E402
-from pitch import pitch_to_hz  # noqa: E402
 
 
 DEFAULT_MONO_SAMPLE = 0

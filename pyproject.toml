@@ -17,6 +17,7 @@ dependencies = [
     "scipy>=1.11.0",
     "httpx",
     "webrtcvad-wheels",
+    "pyworld",
 ]
 
 [project.scripts]
@@ -29,4 +30,8 @@ Repository = "https://github.com/knoel99/reachy-mini"
 where = ["src"]
 
 [tool.setuptools.package-data]
-reachy_voice = ["py.typed"]
+reachy_voice = [
+    "py.typed",
+    "data/humming/sample.wav",
+    "data/humming/manifest.json",
+]
