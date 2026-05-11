@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 from ._log import log
 from .emotions import EmotionPlayer
+from .melody import MelodyPlayer
 from .tools import LOOK_POSES, _make_head_pose, build_tools
 
 if TYPE_CHECKING:
@@ -40,6 +41,7 @@ class RobotActions:
             self.mini,
             RecordedMoves("pollen-robotics/reachy-mini-emotions-library"),
         )
+        self._melody = MelodyPlayer(self.mini)
 
         self._vision: Moondream | FastVLM | None = None
         self._camera: Camera | None = None
@@ -120,8 +122,8 @@ class RobotActions:
                 pass
 
     def is_speaking(self) -> bool:
-        """True while an emotion's bundled audio is still playing."""
-        return self._emotions.is_speaking()
+        """True while an emotion or melody is still playing."""
+        return self._emotions.is_speaking() or self._melody.is_speaking()
 
     def execute(self, name: str, args: dict) -> str:
         """Schedule a tool call. Returns a short status string for the LLM.
@@ -150,6 +152,14 @@ class RobotActions:
                 return "empty_sequence"
             self._run_async(lambda: self._play_sequence(steps))
             return f"queued:{len(steps)}_steps"
+
+        if name == "play_melody":
+            notes = args.get("notes") or []
+            if not notes:
+                return "empty_melody"
+            tempo = args.get("tempo_bpm")
+            self._run_async(lambda: self._melody.play(notes, tempo))
+            return f"queued:{len(notes)}_notes"
 
         if name == "look_and_describe":
             return self._handle_look_and_describe(args.get("question", ""))
@@ -221,7 +231,11 @@ class RobotActions:
 
         def _wrapper() -> None:
             if prev is not None and prev.is_alive():
-                prev.join(timeout=10.0)
+                # Outlast a realistic play_melody buffer (~30s) so
+                # back-to-back audio actions don't overlap on the
+                # speaker. Theoretical max is much higher (_MAX_NOTES
+                # × _MAX_DUR_S), but 120s keeps a deadlock ceiling.
+                prev.join(timeout=120.0)
             t0 = time.monotonic()
             try:
                 fn()

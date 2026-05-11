@@ -1,100 +1,104 @@
 # reachy-mini
 
-Reachy Mini contrôlé par un LLM via deux pipelines vocaux au choix : **OpenAI
-Realtime** (audio bidirectionnel) ou **Grok chat-with-tools** (mic → STT → chat
-avec function-calling). Dans les deux cas le robot n'a pas de voix : il ne
-réagit qu'à travers des appels d'outils — mouvements de tête, antennes,
-chorégraphies, sons d'émotion préenregistrés.
+Reachy Mini driven by an LLM through one of two voice pipelines: **OpenAI
+Realtime** (bidirectional audio) or **Grok chat-with-tools** (mic → STT →
+chat with function-calling). In both cases the robot has no voice — it
+only reacts through tool calls: head movements, antennas, choreographies,
+preloaded emotion sounds.
 
-## Structure
+## Layout
 
 ```
 reachy-mini/
 ├── pyproject.toml
-├── run.sh                        # charge .env, GST_PLUGIN_PATH, LD_PRELOAD
-├── docs/DEPLOY_ON_ROBOT.md       # déploiement systemd sur le Pi
+├── run.sh                        # loads .env, GST_PLUGIN_PATH, LD_PRELOAD
+├── docs/DEPLOY_ON_ROBOT.md       # systemd deployment on the Pi
 ├── scripts/export_emotion_sounds.py
-├── colab/fastvlm_7b_server.ipynb # serveur FastVLM-7B (Colab GPU)
-├── src/reachy_voice/             # pipeline voix
-│   ├── __main__.py
-│   ├── _actions.py               # RobotActions : dispatch tool → robot
-│   ├── _log.py
+├── colab/fastvlm_7b_server.ipynb # FastVLM-7B server (Colab GPU)
+├── src/reachy_voice/             # voice pipeline
+│   ├── __main__.py               # python -m reachy_voice
+│   ├── _actions.py               # RobotActions: tool → robot dispatch (shared)
+│   ├── _log.py                   # log() with timestamp + delta
 │   ├── emotions.py               # EmotionPlayer (preload + push_audio_sample)
-│   ├── tools.py                  # build_tools, build_instructions, LOOK_POSES
-│   ├── openai/realtime.py        # bridge WebSocket
-│   └── grok/{vad,stt,chat}.py    # mic → VAD → STT → chat-with-tools
-└── src/reachy_vision/            # package vision dédié (optionnel)
-    ├── camera.py                 # Camera : dernière frame BGR sous lock
-    ├── moondream.py              # Moondream : caption() + point()
-    ├── fastvlm.py                # FastVLM : caption() (HTTP vers Colab)
-    └── preview.py                # Preview : MJPEG :5050 + overlays debug
+│   ├── melody.py                 # MelodyPlayer (sine-wave melody synth)
+│   ├── tools.py                  # INSTRUCTIONS, LOOK_POSES, build_tools
+│   ├── openai/                   # OpenAI provider
+│   │   └── realtime.py           # OpenAIRealtimeBridge (WebSocket)
+│   └── grok/                     # Grok provider
+│       ├── vad.py                # webrtcvad: utterance segmentation
+│       ├── stt.py                # POST /v1/stt (xAI Speech-to-Text)
+│       └── chat.py               # GrokChatBridge: orchestrator
+└── src/reachy_vision/            # vision package (optional)
+    ├── camera.py                 # Camera: latest BGR frame under lock
+    ├── moondream.py              # Moondream: caption() + point()
+    ├── fastvlm.py                # FastVLM: caption() (HTTP to Colab)
+    └── preview.py                # Preview: MJPEG :5050 + debug overlays
 ```
 
-Installation : `pip install -e .` (voir [INSTALL.md](./INSTALL.md)).
-Pour la vision : `pip install -e '.[vision]'` (ajoute Moondream).
-Lancement : `./run.sh <model>` ou `python -m reachy_voice` ou `reachy-voice`.
+Install: `pip install -e .` (see [INSTALL.md](./INSTALL.md)).
+For vision: `pip install -e '.[vision]'` (adds Moondream).
+Run: `./run.sh <model>`, `python -m reachy_voice`, or `reachy-voice`.
 
-### Activer la vision (optionnel)
+### Enabling vision (optional)
 
-Copie `.env.example` vers `.env` puis configure un backend :
+Copy `.env.example` to `.env` then configure a backend:
 
 ```bash
-# Option A — Moondream cloud (recommandé pour démarrer)
+# Option A — Moondream cloud (recommended to start)
 VISION_BACKEND=moondream
 MOONDREAM_API_KEY=...    # https://moondream.ai/c/account/api-keys
 
-# Option B — FastVLM-7B servi par Colab (voir colab/fastvlm_7b_server.ipynb)
+# Option B — FastVLM-7B served by Colab (see colab/fastvlm_7b_server.ipynb)
 VISION_BACKEND=fastvlm
 FASTVLM_URL=https://xxxx.trycloudflare.com
 ```
 
-Deux outils sont alors exposés au LLM :
-- `look_and_describe(question)` — capture une frame et pose une question
-- `find_object(target)` — localise un objet et oriente la tête
-  (Moondream uniquement — utilise `point()` natif)
+Two extra tools are then exposed to the LLM:
+- `look_and_describe(question)` — capture a frame and ask a question
+- `find_object(target)` — locate an object and aim the head
+  (Moondream only — uses native `point()`)
 
-Une preview web de debug tourne sur `http://localhost:5050` dès que le
-backend vision démarre. Elle stream le MJPEG en direct et overlaye la
-dernière caption + le crosshair du dernier `find_object` (chaque
-overlay fade après 5 s). Désactiver avec `VISION_PREVIEW=0`. La
-preview bind sur `0.0.0.0` — firewall ton LAN ou désactive-la en
-prod sur le Pi.
+A debug web preview runs at `http://localhost:5050` as soon as the
+vision backend starts. It streams live MJPEG and overlays the latest
+caption + the crosshair of the most recent `find_object` (each overlay
+fades after 5 s). Disable with `VISION_PREVIEW=0`. The preview binds
+on `0.0.0.0` — firewall your LAN or disable it in prod on the Pi.
 
-## Les deux pipelines
+## The two pipelines
 
 ### OpenAI Realtime (`provider=openai`)
 
 ```
-mic → PCM 24 kHz → WebSocket → server VAD → STT → modèle (tool calls
-en streaming) → response.done → dispatch sur le robot
+mic → PCM 24 kHz → WebSocket → server VAD → STT → model (streaming
+tool calls) → response.done → dispatch on the robot
 ```
 
-`output_modalities=["text"]` désactive le TTS. Le modèle peut faire du
-reasoning interleaved (`gpt-realtime`, `gpt-realtime-2`).
+`output_modalities=["text"]` disables TTS. Only `gpt-realtime-2`
+supports interleaved reasoning (`reasoning.effort`).
 
 ### Grok chat-with-tools (`provider=grok`)
 
 ```
-mic → PCM 16 kHz → webrtcvad local → utterance → POST /v1/stt →
+mic → PCM 16 kHz → local webrtcvad → utterance → POST /v1/stt →
 text → POST /v1/chat/completions (tools) → tool_calls → dispatch →
-re-call chat avec résultats → loop
+re-call chat with results → loop
 ```
 
-Pas d'API realtime. ~100× moins cher par tour pour un usage tool-only,
-latence plus prévisible (pas de TTS gaspillé). Contexte natif du modèle,
-aucune troncature manuelle.
+No realtime API. Roughly 100× cheaper per turn for tool-only usage,
+with more predictable latency (no TTS budget wasted). Native model
+context, no manual truncation.
 
-## Démarrage
+## Getting started
 
-1. **Installation** (Python + GStreamer + plugin Rust webrtcsrc) : voir
+1. **Install** (Python + GStreamer + Rust `webrtcsrc` plugin): see
    **[INSTALL.md](./INSTALL.md)**.
-2. **Configurer `.env`** :
+2. **Configure `.env`**:
    ```bash
    cp .env.example .env
-   # éditer : OPENAI_API_KEY ou XAI_API_KEY, REACHY_HOST=<ip-LAN-du-robot>
+   # edit: OPENAI_API_KEY or XAI_API_KEY, REACHY_HOST=<robot-LAN-ip>
    ```
-3. **Lancer** — le shortcut est le nom complet du modèle, le provider
-   est déduit du préfixe :
+3. **Run** — the shortcut is the full model name; the provider is
+   inferred from the prefix:
    ```bash
    # OpenAI Realtime
    ./run.sh gpt-realtime-mini
@@ -105,73 +109,76 @@ aucune troncature manuelle.
    ./run.sh grok-4-1-fast-non-reasoning
    ./run.sh grok-4-1-fast-reasoning
 
-   # Override explicite si besoin
+   # Explicit override if needed
    ./run.sh openai <model>
    ./run.sh grok   <model>
 
-   # Sans argument : valeurs par défaut depuis .env
+   # No argument: defaults from .env
    ./run.sh
    ```
 
-## Choix du modèle
+## Picking a model
 
 ### OpenAI Realtime
 
-| Modèle              | Audio in/out / 1M | reasoning.effort | Note                                             |
-| ------------------- | ----------------- | ---------------- | ------------------------------------------------ |
-| `gpt-realtime-mini` | $10 / $20         | non              | Faible coût, conversation simple                 |
-| `gpt-realtime`      | $32 / $64         | oui              | Tool calling robuste                             |
-| `gpt-realtime-2`    | $32 / $64         | oui              | **Latest**, plans multi-étapes (chorégraphies)   |
+| Model               | Audio in/out / 1M | reasoning.effort | Notes                                          |
+| ------------------- | ----------------- | ---------------- | ---------------------------------------------- |
+| `gpt-realtime-mini` | $10 / $20         | no               | Cheap, simple conversation                     |
+| `gpt-realtime`      | $32 / $64         | no               | Solid tool-calling                             |
+| `gpt-realtime-2`    | $32 / $64         | yes              | **Latest**, multi-step planning (choreography) |
 
-`reasoning.effort` ∈ `minimal | low | medium | high`, défaut `medium`,
-configurable via `OPENAI_REASONING_EFFORT`.
+`reasoning.effort` ∈ `minimal | low | medium | high`, defaults to
+`medium`, configurable via `OPENAI_REASONING_EFFORT`.
 
 ### Grok chat
 
-| Modèle                          | Input / 1M | Output / 1M | Note                              |
-| ------------------------------- | ---------- | ----------- | --------------------------------- |
-| `grok-4-1-fast-non-reasoning`   | $0.20      | $0.50       | Le plus rapide, défaut            |
-| `grok-4-1-fast-reasoning`       | $0.20      | $0.50       | Planning sur séquences complexes  |
+| Model                         | Input / 1M | Output / 1M | Notes                          |
+| ----------------------------- | ---------- | ----------- | ------------------------------ |
+| `grok-4-1-fast-non-reasoning` | $0.20      | $0.50       | Fastest, default               |
+| `grok-4-1-fast-reasoning`     | $0.20      | $0.50       | Planning for complex sequences |
 
-À cela s'ajoute le STT REST : **$0.10/hr** d'audio transcrit.
+Plus REST STT: **$0.10/hr** of transcribed audio.
 
 ## Logs
 
-Chaque event-line est préfixé `[HH:MM:SS.mmm +Δs]` (delta depuis le
-log précédent — pratique pour mesurer la latence par étape).
+Every event line is prefixed with `[HH:MM:SS.mmm +Δs]` (delta from the
+previous log — handy for measuring per-step latency).
 
-Au démarrage : `[config] provider=… model=… prices …`. À chaque tour :
-`cost=$X cumul=$Y` + breakdown des tokens. À la fin : `[cost] session
+At startup: `[config] provider=… model=… prices …`. Per turn:
+`cost=$X cumul=$Y` plus token breakdown. At shutdown: `[cost] session
 total: $Z over N turn(s)`.
 
-## Tools exposés au modèle
+## Tools exposed to the model
 
-Le modèle invoque ces fonctions via function-calling (jamais en texte) :
+The model invokes these functions via function-calling (never as text):
 
-- **`play_emotion(name)`** — émotion préenregistrée (mouvement + son
-  audio joint). Enum populé dynamiquement depuis le dataset HF
-  `pollen-robotics/reachy-mini-emotions-library` (~80 émotions).
-- **`look(direction)`** — tête vers `left`, `right`, `up`, `down`,
+- **`play_emotion(name)`** — preloaded emotion (movement + bundled
+  audio). Enum populated dynamically from the HF dataset
+  `pollen-robotics/reachy-mini-emotions-library` (~80 emotions). The
+  bundled choreography is time-stretched to match the audio so head
+  motion and sound stay in sync.
+- **`look(direction)`** — head toward `left`, `right`, `up`, `down`,
   `center`.
-- **`move_sequence(steps)`** — chorégraphie planifiée. Chaque step :
-  `yaw`, `pitch`, `roll` (deg), optionnellement `antenna_left`/`antenna_right`
-  (deg) et `duration` (s). Pour les cercles, hochements, danses,
-  imitations.
+- **`move_sequence(steps)`** — planned choreography. Each step:
+  `yaw`, `pitch`, `roll` (deg), optionally `antenna_left` /
+  `antenna_right` (deg) and `duration` (s). For circles, nods,
+  dances, imitations.
 
-Les trois outils sont implémentés dans
-[`_actions.py`](./src/reachy_voice/_actions.py) et partagés entre les deux
-providers.
+All three tools are implemented in
+[`_actions.py`](./src/reachy_voice/_actions.py) and shared across both
+providers. Calls are serialised through a single worker so motors and
+speaker never collide.
 
-## Trouver l'IP du robot
+## Finding the robot's IP
 
-- **Linux natif** : `ping -4 reachy-mini.local`
-- **WSL2** : depuis PowerShell Windows, `ping -4 reachy-mini.local`
-  (le mDNS WSL2 ne résout pas les `.local` par défaut)
+- **Native Linux**: `ping -4 reachy-mini.local`
+- **WSL2**: from Windows PowerShell, `ping -4 reachy-mini.local`
+  (WSL2's mDNS does not resolve `.local` by default)
 
-## Voir aussi
+## See also
 
-- [INSTALL.md](./INSTALL.md) — installation + dépannage
-- [docs/DEPLOY_ON_ROBOT.md](./docs/DEPLOY_ON_ROBOT.md) — déploiement systemd sur le Pi
+- [INSTALL.md](./INSTALL.md) — installation + troubleshooting
+- [docs/DEPLOY_ON_ROBOT.md](./docs/DEPLOY_ON_ROBOT.md) — systemd deployment on the Pi
 - [OpenAI Realtime API](https://developers.openai.com/api/docs/guides/realtime-websocket)
 - [xAI Voice Agent API](https://docs.x.ai/developers/model-capabilities/audio/voice-agent)
 - [xAI Speech-to-Text REST](https://docs.x.ai/developers/rest-api-reference/inference/voice)

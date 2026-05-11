@@ -59,6 +59,11 @@ PRICING = {
 REASONING_MODELS = {"gpt-realtime-2"}
 REASONING_EFFORT = os.environ.get("OPENAI_REASONING_EFFORT", "medium")
 
+# Drop mic samples for this long after WS open. The audio pipeline
+# usually has a short burst of buffered noise around the connect
+# moment, which VAD would otherwise commit as a phantom user turn.
+_MIC_GRACE_S = 1.2
+
 # Tools whose execute() may take >100ms and must NOT run on the WS
 # reader thread (otherwise barge-in / response.done are stalled).
 # Vision queries take ~0.5s (Moondream cloud) up to 30s (FastVLM).
@@ -88,6 +93,7 @@ class OpenAIRealtimeBridge:
 
         self._response_active = False
         self._last_done_response_id: str | None = None
+        self._mic_open_at: float = 0.0
         self._needs_followup_response = False
 
         # Coordinates the WS reader thread with off-thread slow-tool
@@ -203,10 +209,23 @@ class OpenAIRealtimeBridge:
         self.media.start_playing()
         self.media.start_recording()
         self.actions.start_camera()
+        self._mic_open_at = time.monotonic()
         threading.Thread(target=self._mic_loop, daemon=True).start()
 
     def _mic_loop(self) -> None:
+        grace_cleared = False
         while not self._stop.is_set():
+            # Discard buffered audio captured before/during the
+            # connect handshake; otherwise VAD commits a phantom turn
+            # at startup and the model "responds" before the user has
+            # said anything.
+            if time.monotonic() - self._mic_open_at < _MIC_GRACE_S:
+                self.media.get_audio_sample()
+                time.sleep(0.01)
+                continue
+            if not grace_cleared:
+                self._send({"type": "input_audio_buffer.clear"})
+                grace_cleared = True
             samples = self.media.get_audio_sample()
             if samples is None or len(samples) == 0:
                 time.sleep(0.01)
@@ -308,6 +327,11 @@ class OpenAIRealtimeBridge:
             return
 
         result = self.actions.execute(name, args)
+        # Provide the function result so the conversation history is
+        # consistent, but do NOT trigger a follow-up `response.create`.
+        # The robot has no voice and no user-facing text, so a follow-up
+        # response only causes the model to chain extra tool calls (e.g.
+        # play_emotion → look → move_sequence) and emit stray prose.
         self._send({
             "type": "conversation.item.create",
             "item": {
@@ -316,7 +340,6 @@ class OpenAIRealtimeBridge:
                 "output": json.dumps({"status": result}),
             },
         })
-        self._needs_followup_response = True
 
     def _dispatch_slow_tool(self, name: str, call_id: str, args: dict) -> None:
         try:

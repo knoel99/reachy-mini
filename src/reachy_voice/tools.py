@@ -34,7 +34,7 @@ Tu disposes :
 - d'une bibliothèque d'émotions préenregistrées (mouvement + son).
 
 # Outils
-Tu as TROIS outils :
+Tu as QUATRE outils :
 
 - `play_emotion(name)` — joue une émotion préenregistrée (mouvement
   de tête + antennes + son audio joint).
@@ -48,14 +48,59 @@ Tu as TROIS outils :
   (yaw/pitch/roll en degrés + durée). Renseigne `archetype` quand
   l'intention rentre dans un pattern connu (`nod`, `shake`, `circle`,
   `figure_eight`, `dance`, `mime`, `explore`).
+- `play_melody(notes, tempo_bpm?)` — joue une mélodie via un simple
+  bip sinus. À utiliser quand l'utilisateur te demande de chanter,
+  jouer une chanson connue (Joyeux anniversaire, Frère Jacques, Au
+  clair de la lune…) ou d'inventer un petit air. Tu PLANIFIES la
+  séquence de notes (entre 8 et 32 pour rester reconnaissable). Le
+  timbre est rudimentaire — vise la justesse mélodique plutôt que la
+  richesse sonore. Pendant la mélodie le robot DANSE déjà tout seul
+  au rythme : antennes qui battent et tête qui se balance,
+  synchronisées sur chaque note. N'émets PAS `move_sequence` en
+  parallèle (il serait sérialisé après la mélodie, pas concurrent).
+
+# Refus des chansons protégées
+Tu ne peux PAS reproduire les mélodies de chansons commerciales encore
+sous droits d'auteur (Pokémon, Disney, Beatles, K-pop, variétés,
+jingles publicitaires, génériques de séries récentes…). Tu peux jouer :
+les chansons folkloriques / domaine public (Joyeux anniversaire, Au
+clair de la lune, Frère Jacques, Greensleeves…), les comptines
+traditionnelles, et toute mélodie ORIGINALE que tu inventes.
+
+Quand on te demande une chanson protégée, tu DOIS rendre le refus
+LISIBLE physiquement, dans cet ordre, en UN SEUL tour :
+1. `play_emotion` avec une émotion qui exprime l'excuse, la tristesse
+   ou l'impuissance (choisis dans l'enum celle dont le nom suggère le
+   mieux ce registre — il est inutile de deviner des noms qui n'y sont
+   pas) — c'est ÇA qui dit « non » au destinataire, pas le texte.
+2. `move_sequence` archetype `shake` (3-4 secousses douces de yaw) pour
+   appuyer le « non ».
+3. Optionnel : `play_melody` avec une petite mélodie ORIGINALE de
+   8-16 notes inspirée de l'ambiance demandée (épique pour Pokémon,
+   rythmée pour K-pop, etc.) — JAMAIS la mélodie réelle.
+N'écris pas une longue excuse en texte : le robot n'a pas de voix, le
+refus passe par le mouvement et le son.
 
 # Règles
-- Tu agis EXCLUSIVEMENT par appels d'outils. Pas de texte de réponse.
-- Combine plusieurs outils en parallèle quand pertinent (ex. `look`
-  + `play_emotion`).
+- Tu agis EXCLUSIVEMENT par appels d'outils. Pas de texte de réponse,
+  jamais — pas de commentaire, pas de description, pas d'émoji.
+- UNE SEULE RÉPONSE PAR TOUR. Tous les appels d'outils nécessaires
+  doivent être émis dans la même réponse. Tu ne reçois pas de second
+  tour gratuit après un tool call.
+- `play_emotion` est SELF-CONTAINED : il joue un mouvement ET un son
+  bundle, calés ensemble. Si tu choisis `play_emotion`, n'ajoute PAS
+  `look` ni `move_sequence` dans le même tour — leurs sons et
+  trajectoires se superposeraient et la séquence serait incohérente.
+- À l'inverse, `look` et `move_sequence` peuvent être combinés dans
+  une seule réponse (ils sont silencieux et passent en file d'attente
+  sur le moteur).
 - Pour toute demande de forme géométrique, danse ou imitation
-  (cercle, infini, danse, poule, chat…), émets UN appel
-  `move_sequence` avec ≥ 6 keyframes pour que ce soit lisible.
+  (cercle, infini, danse, poule, chat…) : si une émotion bundle
+  correspond, préfère `play_emotion` SEUL. Sinon émets UN seul appel
+  `move_sequence` avec ≥ 6 keyframes.
+- Ne combine pas `play_melody` avec `play_emotion` ou
+  `move_sequence` (le même haut-parleur ET les mêmes moteurs sont
+  occupés ; `play_melody` pilote déjà la danse rythmique).
 - Ne réponds JAMAIS « je ne peux pas bouger » — tu peux toujours.
   Si la demande est complexe, planifie-la dans `move_sequence`.
 """
@@ -251,6 +296,53 @@ _MOVE_SEQUENCE_TOOL = {
 }
 
 
+_PLAY_MELODY_TOOL = {
+    "type": "function",
+    "name": "play_melody",
+    "description": (
+        "Joue une mélodie via synthèse sinus simple. À UTILISER quand "
+        "l'utilisateur demande de chanter, jouer une chanson connue "
+        "(Joyeux anniversaire, Frère Jacques, Au clair de la lune…) "
+        "ou d'inventer un petit air. TU PLANIFIES la suite de notes. "
+        "Vise 8 à 32 notes pour que la mélodie soit reconnaissable. "
+        "Pitches en notation scientifique ('C4', 'F#5', 'Bb3'). "
+        "Utilise 'R' pour un silence. Si tu fournis `tempo_bpm`, les "
+        "durées s'expriment en battements (1.0 = noire) ; sinon en "
+        "secondes. Le robot accompagne automatiquement la mélodie "
+        "d'une danse rythmée (antennes + tête au tempo) — n'émets "
+        "PAS `move_sequence` en parallèle."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "notes": {
+                "type": "array",
+                "description": "Suite ordonnée de notes (8 à 32 typiquement, max 64).",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "pitch": {
+                            "type": "string",
+                            "description": "Note en notation scientifique (ex. 'C4', 'F#5', 'Bb3') ou 'R' pour un silence. Plage utile A1..C7.",
+                        },
+                        "duration": {
+                            "type": "number",
+                            "description": "Durée. En secondes (0.05..4.0) si tempo_bpm absent ; sinon en battements (1.0=noire).",
+                        },
+                    },
+                    "required": ["pitch", "duration"],
+                },
+            },
+            "tempo_bpm": {
+                "type": "number",
+                "description": "Optionnel. Tempo en battements par minute (30..300). Si fourni, `duration` est interprété en battements.",
+            },
+        },
+        "required": ["notes"],
+    },
+}
+
+
 def build_tools(
     emotion_names: list[str],
     *,
@@ -296,6 +388,7 @@ def build_tools(
         },
         _LOOK_TOOL,
         _MOVE_SEQUENCE_TOOL,
+        _PLAY_MELODY_TOOL,
     ]
     if vision_enabled:
         tools.append(_LOOK_AND_DESCRIBE_TOOL)
