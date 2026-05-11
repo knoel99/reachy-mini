@@ -99,14 +99,6 @@ def _pitch_to_midi(pitch: str) -> int | None:
     return midi
 
 
-def _pitch_to_hz(pitch: str) -> float | None:
-    """Parse scientific pitch notation ('C4', 'F#5', 'Bb3') to Hz."""
-    midi = _pitch_to_midi(pitch)
-    if midi is None:
-        return None
-    return 440.0 * (2.0 ** ((midi - 69) / 12.0))
-
-
 class MelodyPlayer:
     """Renders LLM-supplied note sequences as a sine wave (sync)."""
 

@@ -244,7 +244,7 @@ _PLAY_MELODY_TOOL = {
                         },
                         "duration": {
                             "type": "number",
-                            "description": "Durée. En secondes (0.05..2.0) si tempo_bpm absent ; sinon en battements (1.0=noire).",
+                            "description": "Durée. En secondes (0.05..4.0) si tempo_bpm absent ; sinon en battements (1.0=noire).",
                         },
                     },
                     "required": ["pitch", "duration"],
