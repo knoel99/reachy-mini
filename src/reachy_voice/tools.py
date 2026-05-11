@@ -85,6 +85,11 @@ les chansons folkloriques / domaine public (Joyeux anniversaire, Au
 clair de la lune, Frère Jacques, Greensleeves…), les comptines
 traditionnelles, et toute mélodie ORIGINALE que tu inventes.
 
+Exception « Macarena » : si l'utilisateur demande la Macarena,
+appelle `play_melody(melody_id='macarena')`. Le projet embarque une
+mélodie ORIGINALE en clin d'œil + une chorégraphie scriptée — ce n'est
+PAS la mélodie protégée, donc pas de refus dans ce cas précis.
+
 Quand on te demande une chanson protégée, tu DOIS rendre le refus
 LISIBLE physiquement, dans cet ordre, en UN SEUL tour :
 1. `play_emotion` avec une émotion qui exprime l'excuse, la tristesse
@@ -256,14 +261,23 @@ _PLAY_MELODY_TOOL = {
         "durées s'expriment en battements (1.0 = noire) ; sinon en "
         "secondes. Le robot accompagne automatiquement la mélodie "
         "d'une danse rythmée (antennes + tête au tempo) — n'émets "
-        "PAS `move_sequence` en parallèle."
+        "PAS `move_sequence` en parallèle. "
+        "Alternative : `melody_id='macarena'` joue un hook latin "
+        "original (clin d'œil, PAS la chanson protégée) accompagné "
+        "d'une chorégraphie body_yaw + antennes scriptée. Quand "
+        "`melody_id` est fourni, `notes` et `tempo_bpm` sont ignorés."
     ),
     "parameters": {
         "type": "object",
         "properties": {
+            "melody_id": {
+                "type": "string",
+                "description": "Mélodie préprogrammée (override `notes`). À utiliser quand l'utilisateur demande explicitement la Macarena.",
+                "enum": ["macarena"],
+            },
             "notes": {
                 "type": "array",
-                "description": "Suite ordonnée de notes (8 à 32 typiquement, max 64).",
+                "description": "Suite ordonnée de notes (8 à 32 typiquement, max 64). Requis sauf si `melody_id` est fourni.",
                 "items": {
                     "type": "object",
                     "properties": {
@@ -284,7 +298,6 @@ _PLAY_MELODY_TOOL = {
                 "description": "Optionnel. Tempo en battements par minute (30..300). Si fourni, `duration` est interprété en battements.",
             },
         },
-        "required": ["notes"],
     },
 }
 
