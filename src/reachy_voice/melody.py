@@ -32,6 +32,10 @@ _SPEAKING_PAD_S = 0.5
 _MAX_NOTES = 64
 _MIN_DUR_S = 0.05
 _MAX_DUR_S = 4.0
+# Total audio length cap. Kept ≤ the `_run_async` join timeout in
+# `_actions.py` so a max-length melody can't be still playing when the
+# next queued action starts pushing audio onto the same speaker.
+_MAX_TOTAL_DUR_S = 120.0
 _MIN_BPM = 30.0
 _MAX_BPM = 300.0
 _MIN_MIDI = 33   # A1  (~55 Hz)
@@ -186,6 +190,7 @@ class MelodyPlayer:
             notes = notes[:_MAX_NOTES]
 
         out: list[tuple[int | None, float, int]] = []
+        total_dur = 0.0
         for note in notes:
             if not isinstance(note, dict):
                 continue
@@ -199,6 +204,13 @@ class MelodyPlayer:
             n = int(rate * dur_s)
             if n <= 0:
                 continue
+            if total_dur + dur_s > _MAX_TOTAL_DUR_S:
+                log(
+                    f"[melody] total duration would exceed "
+                    f"{_MAX_TOTAL_DUR_S}s, truncating at {len(out)} notes"
+                )
+                break
+            total_dur += dur_s
             out.append((_pitch_to_midi(pitch), dur_s, n))
         return out
 
@@ -237,42 +249,43 @@ class MelodyPlayer:
         )
 
         pitch_span = _DANCE_PITCH_HIGH_MIDI - _DANCE_PITCH_LOW_MIDI
-        for i, (midi, dur_s, _n) in enumerate(resolved):
-            sign = 1.0 if i % 2 == 0 else -1.0
-            if midi is None:
-                amp = _DANCE_MIN_AMP
-            else:
-                norm = (midi - _DANCE_PITCH_LOW_MIDI) / pitch_span
-                amp = max(_DANCE_MIN_AMP, min(1.0, norm))
+        try:
+            for i, (midi, dur_s, _n) in enumerate(resolved):
+                sign = 1.0 if i % 2 == 0 else -1.0
+                if midi is None:
+                    amp = _DANCE_MIN_AMP
+                else:
+                    norm = (midi - _DANCE_PITCH_LOW_MIDI) / pitch_span
+                    amp = max(_DANCE_MIN_AMP, min(1.0, norm))
 
-            antenna_l_deg = sign * (
-                _DANCE_ANTENNA_BASE_DEG + amp * _DANCE_ANTENNA_GAIN_DEG
-            )
-            antenna_r_deg = -antenna_l_deg
-            roll_deg = sign * _DANCE_HEAD_ROLL_DEG * amp
-            pitch_deg = -_DANCE_HEAD_PITCH_DEG * amp
+                antenna_l_deg = sign * (
+                    _DANCE_ANTENNA_BASE_DEG + amp * _DANCE_ANTENNA_GAIN_DEG
+                )
+                antenna_r_deg = -antenna_l_deg
+                roll_deg = sign * _DANCE_HEAD_ROLL_DEG * amp
+                pitch_deg = -_DANCE_HEAD_PITCH_DEG * amp
 
-            pose = _make_head_pose(roll_deg=roll_deg, pitch_deg=pitch_deg)
-            antennas = [
-                np.deg2rad(antenna_l_deg),
-                np.deg2rad(antenna_r_deg),
-            ]
+                pose = _make_head_pose(roll_deg=roll_deg, pitch_deg=pitch_deg)
+                antennas = [
+                    np.deg2rad(antenna_l_deg),
+                    np.deg2rad(antenna_r_deg),
+                ]
+                try:
+                    self.mini.goto_target(
+                        pose, antennas=antennas, duration=dur_s
+                    )
+                except Exception as e:
+                    log(f"[melody] dance step failed: {e}")
+                    return
+        finally:
             try:
                 self.mini.goto_target(
-                    pose, antennas=antennas, duration=dur_s
+                    INIT_HEAD_POSE,
+                    antennas=INIT_ANTENNAS_JOINT_POSITIONS,
+                    duration=0.4,
                 )
             except Exception as e:
-                log(f"[melody] dance step failed: {e}")
-                return
-
-        try:
-            self.mini.goto_target(
-                INIT_HEAD_POSE,
-                antennas=INIT_ANTENNAS_JOINT_POSITIONS,
-                duration=0.4,
-            )
-        except Exception as e:
-            log(f"[melody] return to neutral failed: {e}")
+                log(f"[melody] return to neutral failed: {e}")
 
     def play(
         self, notes: list[dict], tempo_bpm: float | None = None
