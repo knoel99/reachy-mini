@@ -231,14 +231,22 @@ class MelodyPlayer:
         return np.concatenate(chunks).astype(np.float32, copy=False)
 
     def _dance(
-        self, resolved: list[tuple[int | None, float, int]]
+        self,
+        resolved: list[tuple[int | None, float, int]],
+        dance_steps: list[dict] | None = None,
     ) -> None:
         """Drive head + antennas in lockstep with the synthesised audio.
 
-        One ``goto_target`` step per note; antennas alternate flap
-        direction; pitch height drives amplitude. The sum of step
+        Default mode: one ``goto_target`` step per note; antennas alternate
+        flap direction; pitch height drives amplitude. The sum of step
         durations equals the audio length, so motion stays locked to
         the rhythm.
+
+        When ``dance_steps`` is supplied, each note is paired 1:1 with the
+        corresponding step dict (same shape as ``move_sequence`` steps:
+        roll/pitch/yaw/x/y/z/body_yaw/antenna_left/right, all optional,
+        in degrees / mm). Missing fields default to neutral. If the lists
+        don't match in length, we fall back to the default choreography.
         """
         if not resolved:
             return
@@ -247,6 +255,56 @@ class MelodyPlayer:
             INIT_ANTENNAS_JOINT_POSITIONS,
             INIT_HEAD_POSE,
         )
+
+        if dance_steps is not None and len(dance_steps) != len(resolved):
+            log(
+                f"[melody] dance_steps len {len(dance_steps)} != "
+                f"notes len {len(resolved)}, using default choreography"
+            )
+            dance_steps = None
+
+        if dance_steps is not None:
+            try:
+                for (_midi, dur_s, _n), step in zip(resolved, dance_steps):
+                    roll = float(step.get("roll", 0.0))
+                    pitch = float(step.get("pitch", 0.0))
+                    yaw = float(step.get("yaw", 0.0))
+                    x_mm = float(step.get("x", 0.0))
+                    y_mm = float(step.get("y", 0.0))
+                    z_mm = float(step.get("z", 0.0))
+                    pose = _make_head_pose(roll, pitch, yaw, x_mm, y_mm, z_mm)
+
+                    al = step.get("antenna_left")
+                    ar = step.get("antenna_right")
+                    antennas = [
+                        np.deg2rad(float(al or 0.0)),
+                        np.deg2rad(float(ar or 0.0)),
+                    ]
+
+                    by = step.get("body_yaw")
+                    body_yaw_rad = (
+                        np.deg2rad(float(by)) if by is not None else None
+                    )
+
+                    try:
+                        self.mini.goto_target(
+                            pose, antennas=antennas, body_yaw=body_yaw_rad,
+                            duration=dur_s,
+                        )
+                    except Exception as e:
+                        log(f"[melody] custom dance step failed: {e}")
+                        return
+            finally:
+                try:
+                    self.mini.goto_target(
+                        INIT_HEAD_POSE,
+                        antennas=INIT_ANTENNAS_JOINT_POSITIONS,
+                        body_yaw=0.0,
+                        duration=0.4,
+                    )
+                except Exception as e:
+                    log(f"[melody] return to neutral failed: {e}")
+            return
 
         pitch_span = _DANCE_PITCH_HIGH_MIDI - _DANCE_PITCH_LOW_MIDI
         try:
@@ -288,10 +346,17 @@ class MelodyPlayer:
                 log(f"[melody] return to neutral failed: {e}")
 
     def play(
-        self, notes: list[dict], tempo_bpm: float | None = None
+        self,
+        notes: list[dict],
+        tempo_bpm: float | None = None,
+        dance_steps: list[dict] | None = None,
     ) -> bool:
         """Synthesise + push audio, dance to the rhythm, then block
-        until the audio has played out."""
+        until the audio has played out.
+
+        ``dance_steps``, when supplied, overrides the default flap-and-roll
+        choreography note-by-note. See ``_dance`` for the step shape.
+        """
         if not notes:
             return False
 
@@ -310,7 +375,7 @@ class MelodyPlayer:
             except Exception as e:
                 log(f"[melody] push_audio_sample failed: {e}")
                 return False
-            self._dance(resolved)
+            self._dance(resolved, dance_steps=dance_steps)
             rem = self._speaking_until - time.monotonic()
             if rem > 0:
                 time.sleep(rem)

@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from ._log import log
 from .emotions import EmotionPlayer
 from .melody import MelodyPlayer
+from .melody_tools import BUNDLES_BY_TOOL_NAME
 from .tools import LOOK_POSES, _make_head_pose, build_tools
 
 if TYPE_CHECKING:
@@ -75,6 +76,15 @@ class RobotActions:
             tempo = args.get("tempo_bpm")
             self._run_async(lambda: self._melody.play(notes, tempo))
             return f"queued:{len(notes)}_notes"
+
+        bundle = BUNDLES_BY_TOOL_NAME.get(name)
+        if bundle is not None:
+            self._run_async(
+                lambda: self._melody.play(
+                    bundle.notes, bundle.bpm, dance_steps=bundle.keyframes
+                )
+            )
+            return f"queued:{bundle.name}"
 
         return f"unknown_tool:{name}"
 
