@@ -128,7 +128,16 @@ class RobotActions:
                     ar_rad = np.deg2rad(max(-90.0, min(90.0, float(ar or 0.0))))
                     antennas = [al_rad, ar_rad]
 
-                self.mini.goto_target(pose, antennas=antennas, duration=duration)
+                body_yaw_rad = None
+                by = step.get("body_yaw")
+                if by is not None:
+                    by_deg = max(-160.0, min(160.0, float(by)))
+                    body_yaw_rad = np.deg2rad(by_deg)
+
+                self.mini.goto_target(
+                    pose, antennas=antennas, body_yaw=body_yaw_rad,
+                    duration=duration,
+                )
             except Exception as e:
                 log(f"[seq] step failed: {e}")
                 return
@@ -137,6 +146,7 @@ class RobotActions:
             self.mini.goto_target(
                 INIT_HEAD_POSE,
                 antennas=INIT_ANTENNAS_JOINT_POSITIONS,
+                body_yaw=0.0,
                 duration=0.5,
             )
         except Exception as e:
