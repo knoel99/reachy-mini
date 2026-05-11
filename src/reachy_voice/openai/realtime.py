@@ -343,7 +343,13 @@ class OpenAIRealtimeBridge:
 
     def _dispatch_slow_tool(self, name: str, call_id: str, args: dict) -> None:
         try:
-            result = self.actions.execute(name, args)
+            try:
+                result = self.actions.execute(name, args)
+            except Exception as e:
+                # Never leave the model with an orphan function_call:
+                # always send a function_call_output, even on crash.
+                log(f"[tool] {name} crashed: {e}")
+                result = f"error:{e}"
             self._send({
                 "type": "conversation.item.create",
                 "item": {

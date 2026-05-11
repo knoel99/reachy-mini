@@ -17,7 +17,6 @@ dependencies = [
     "scipy>=1.11.0",
     "httpx",
     "webrtcvad-wheels",
-    "Pillow>=10.0",
 ]
 
 [project.optional-dependencies]
@@ -25,6 +24,7 @@ vision = [
     "moondream>=0.1.0",
     "fastapi>=0.110",
     "uvicorn[standard]>=0.27",
+    "Pillow>=10.0",
 ]
 
 [project.scripts]

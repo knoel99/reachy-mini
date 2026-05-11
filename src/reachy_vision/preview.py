@@ -42,7 +42,7 @@ class Preview:
     def __init__(
         self,
         camera: Camera,
-        host: str = "0.0.0.0",
+        host: str = "127.0.0.1",
         port: int = 5050,
         overlay_ttl_s: float = 5.0,
         stream_fps: float = 5.0,

@@ -88,6 +88,7 @@ class RobotActions:
             try:
                 self._preview = Preview(
                     self._camera,
+                    host=os.environ.get("VISION_PREVIEW_HOST", "127.0.0.1"),
                     port=int(os.environ.get("VISION_PREVIEW_PORT", "5050")),
                 )
             except Exception as e:

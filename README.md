@@ -61,8 +61,9 @@ Two extra tools are then exposed to the LLM:
 A debug web preview runs at `http://localhost:5050` as soon as the
 vision backend starts. It streams live MJPEG and overlays the latest
 caption + the crosshair of the most recent `find_object` (each overlay
-fades after 5 s). Disable with `VISION_PREVIEW=0`. The preview binds
-on `0.0.0.0` — firewall your LAN or disable it in prod on the Pi.
+fades after 5 s). Disable with `VISION_PREVIEW=0`. The preview binds on
+`127.0.0.1` by default (localhost only); set `VISION_PREVIEW_HOST=0.0.0.0`
+to expose it on the LAN (firewall first).
 
 ## The two pipelines
 
