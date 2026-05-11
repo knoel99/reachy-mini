@@ -21,9 +21,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-moondream = ["moondream>=0.1.0"]
-fastvlm = []  # FastVLM client only needs httpx, already in base deps
-vision = ["moondream>=0.1.0"]
+vision = [
+    "moondream>=0.1.0",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+]
 
 [project.scripts]
 reachy-voice = "reachy_voice.__main__:main"

@@ -9,6 +9,7 @@ async worker so two `move_sequence` calls never collide.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from typing import TYPE_CHECKING
@@ -16,10 +17,10 @@ from typing import TYPE_CHECKING
 from ._log import log
 from .emotions import EmotionPlayer
 from .tools import LOOK_POSES, _make_head_pose, build_tools
-from .vision import CameraWorker, VisionBackend, build_vision_backend
 
 if TYPE_CHECKING:
     from reachy_mini import ReachyMini
+    from reachy_vision import Camera, FastVLM, Moondream, Preview
 
 
 class RobotActions:
@@ -40,18 +41,10 @@ class RobotActions:
             RecordedMoves("pollen-robotics/reachy-mini-emotions-library"),
         )
 
-        # Optional vision backend selected by VISION_BACKEND env var.
-        # CameraWorker only spins up when a backend is configured, so
-        # the Pi pays zero CPU cost when vision is off.
-        self._vision: VisionBackend | None = None
-        self._camera: CameraWorker | None = None
-        try:
-            self._vision = build_vision_backend()
-        except Exception as e:
-            log(f"[vision] backend init failed, vision disabled: {e}")
-            self._vision = None
-        if self._vision is not None:
-            self._camera = CameraWorker(self.mini, fps=5.0)
+        self._vision: Moondream | FastVLM | None = None
+        self._camera: Camera | None = None
+        self._preview: Preview | None = None
+        self._init_vision()
 
         self.vision_enabled = self._vision is not None
         self.vision_grounding = bool(self._vision and self._vision.supports_grounding)
@@ -63,18 +56,64 @@ class RobotActions:
         )
         self._move_thread: threading.Thread | None = None
 
-    # ---- Vision lifecycle (no-op when vision is off) ----
+    def _init_vision(self) -> None:
+        backend = os.environ.get("VISION_BACKEND", "").strip().lower()
+        if not backend or backend == "none":
+            return
+        try:
+            from reachy_vision import Camera, FastVLM, Moondream, Preview
+        except ImportError as e:
+            log(f"[vision] reachy_vision import failed, vision disabled: {e}")
+            return
+        try:
+            if backend == "moondream":
+                api_key = os.environ.get("MOONDREAM_API_KEY", "").strip() or None
+                local = os.environ.get("MOONDREAM_LOCAL", "").lower() in ("1", "true", "yes")
+                self._vision = Moondream(api_key=api_key, local=local)
+            elif backend == "fastvlm":
+                url = os.environ.get("FASTVLM_URL", "").strip()
+                timeout = float(os.environ.get("FASTVLM_TIMEOUT", "30"))
+                self._vision = FastVLM(base_url=url, timeout=timeout)
+            else:
+                log(f"[vision] unknown VISION_BACKEND={backend!r}, vision disabled")
+                return
+        except Exception as e:
+            log(f"[vision] backend init failed, vision disabled: {e}")
+            self._vision = None
+            return
+        self._camera = Camera(self.mini, fps=5.0)
+        if os.environ.get("VISION_PREVIEW", "1") != "0":
+            try:
+                self._preview = Preview(
+                    self._camera,
+                    port=int(os.environ.get("VISION_PREVIEW_PORT", "5050")),
+                )
+            except Exception as e:
+                log(f"[preview] init failed, preview disabled: {e}")
+                self._preview = None
+
     def start_camera(self) -> None:
         if self._camera is not None:
             self._camera.start()
+        if self._preview is not None:
+            try:
+                self._preview.start()
+            except Exception as e:
+                log(f"[preview] start failed: {e}")
+                self._preview = None
 
     def stop_camera(self) -> None:
+        if self._preview is not None:
+            try:
+                self._preview.stop()
+            except Exception as e:
+                log(f"[preview] stop failed: {e}")
         if self._camera is not None:
             try:
                 self._camera.stop()
             except Exception as e:
                 log(f"[camera] stop failed: {e}")
-        if self._vision is not None:
+        if self._vision is not None and hasattr(self._vision, "close"):
             try:
                 self._vision.close()
             except Exception:
@@ -120,7 +159,6 @@ class RobotActions:
 
         return f"unknown_tool:{name}"
 
-    # ---- Vision tool handlers (synchronous: provider blocks on result) ----
     def _handle_look_and_describe(self, question: str) -> str:
         if self._vision is None or self._camera is None:
             return "vision_not_enabled"
@@ -131,17 +169,16 @@ class RobotActions:
         if frame is None:
             return "no_frame_available"
         try:
-            res = self._vision.query(frame, question)
+            text = self._vision.caption(frame, question)
         except Exception as e:
-            log(f"[vision] query failed: {e}")
+            log(f"[vision] caption failed: {e}")
             return f"error:{e}"
-        text = (res.text or "").strip()
         if not text:
             return "no_answer"
-        # Cap to keep the model's followup context tight: vision answers
-        # can run long even with a "court" system instruction.
         if len(text) > 300:
             text = text[:297] + "..."
+        if self._preview is not None:
+            self._preview.register_caption(question, text)
         return text
 
     def _handle_find_object(self, target: str) -> str:
@@ -155,28 +192,16 @@ class RobotActions:
         frame = self._camera.get_latest()
         if frame is None:
             return "no_frame_available"
-
-        # Prefer point() (single coord) over detect() — closer to what we
-        # actually need (where to aim the head). Fall back to detect's
-        # bbox center when the model returns nothing pointable.
         try:
-            res = self._vision.point(frame, target)
+            points = self._vision.point(frame, target)
         except Exception as e:
             log(f"[vision] point failed: {e}")
             return f"error:{e}"
-
-        if not res.points:
-            try:
-                det = self._vision.detect(frame, target)
-            except Exception as e:
-                log(f"[vision] detect failed: {e}")
-                return f"not_found:{target}"
-            if not det.boxes:
-                return f"not_found:{target}"
-            cx, cy = det.boxes[0].center
-        else:
-            cx, cy = res.points[0].x, res.points[0].y
-
+        if not points:
+            return f"not_found:{target}"
+        cx, cy = points[0]
+        if self._preview is not None:
+            self._preview.register_detection(target, [(cx, cy)])
         h, w, _ = frame.shape
         px, py = cx * w, cy * h
 
