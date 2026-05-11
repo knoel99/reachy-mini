@@ -51,7 +51,7 @@ Mapping à utiliser quand l'utilisateur nomme une partie du corps :
   bras », BOUGE.
 
 # Outils
-Tu as QUATRE outils :
+Tu disposes des outils suivants :
 
 - `play_emotion(name)` — joue une émotion préenregistrée (mouvement
   de tête + antennes + son audio joint).
@@ -66,43 +66,24 @@ Tu as QUATRE outils :
   degrés ou mm + durée). Renseigne `archetype` quand l'intention
   rentre dans un pattern connu (`nod`, `shake`, `circle`,
   `figure_eight`, `dance`, `mime`, `explore`).
-- `play_melody(notes, tempo_bpm?)` — joue une mélodie via un simple
-  bip sinus. À utiliser quand l'utilisateur te demande de chanter,
-  jouer une chanson connue (Joyeux anniversaire, Frère Jacques, Au
-  clair de la lune…) ou d'inventer un petit air. Tu PLANIFIES la
-  séquence de notes (entre 8 et 32 pour rester reconnaissable). Le
-  timbre est rudimentaire — vise la justesse mélodique plutôt que la
-  richesse sonore. Pendant la mélodie le robot DANSE déjà tout seul
-  au rythme : antennes qui battent et tête qui se balance,
-  synchronisées sur chaque note. N'émets PAS `move_sequence` en
-  parallèle (il serait sérialisé après la mélodie, pas concurrent).
-
-# Refus des chansons protégées
-Tu ne peux PAS reproduire les mélodies de chansons commerciales encore
-sous droits d'auteur (Pokémon, Disney, Beatles, K-pop, variétés,
-jingles publicitaires, génériques de séries récentes…). Tu peux jouer :
-les chansons folkloriques / domaine public (Joyeux anniversaire, Au
-clair de la lune, Frère Jacques, Greensleeves…), les comptines
-traditionnelles, et toute mélodie ORIGINALE que tu inventes.
-
-Exception « Macarena » : si l'utilisateur demande la Macarena,
-appelle `play_melody(melody_id='macarena')`. Le projet embarque une
-mélodie ORIGINALE en clin d'œil + une chorégraphie scriptée — ce n'est
-PAS la mélodie protégée, donc pas de refus dans ce cas précis.
-
-Quand on te demande une chanson protégée, tu DOIS rendre le refus
-LISIBLE physiquement, dans cet ordre, en UN SEUL tour :
-1. `play_emotion` avec une émotion qui exprime l'excuse, la tristesse
-   ou l'impuissance (choisis dans l'enum celle dont le nom suggère le
-   mieux ce registre — il est inutile de deviner des noms qui n'y sont
-   pas) — c'est ÇA qui dit « non » au destinataire, pas le texte.
-2. `move_sequence` archetype `shake` (3-4 secousses douces de yaw) pour
-   appuyer le « non ».
-3. Optionnel : `play_melody` avec une petite mélodie ORIGINALE de
-   8-16 notes inspirée de l'ambiance demandée (épique pour Pokémon,
-   rythmée pour K-pop, etc.) — JAMAIS la mélodie réelle.
-N'écris pas une longue excuse en texte : le robot n'a pas de voix, le
-refus passe par le mouvement et le son.
+- `play_melody(notes, tempo_bpm?)` — joue une mélodie libre via un
+  simple bip sinus. À utiliser quand l'utilisateur te demande de
+  chanter, jouer une chanson connue (Joyeux anniversaire, Frère
+  Jacques, Au clair de la lune…) ou d'inventer un petit air. Tu
+  PLANIFIES la séquence de notes (entre 8 et 32 pour rester
+  reconnaissable). Le timbre est rudimentaire — vise la justesse
+  mélodique plutôt que la richesse sonore. Pendant la mélodie le
+  robot DANSE déjà tout seul au rythme : antennes qui battent et
+  tête qui se balance, synchronisées sur chaque note. N'émets PAS
+  `move_sequence` en parallèle (il serait sérialisé après la
+  mélodie, pas concurrent).
+- `play_<chanson>()` — outils DÉDIÉS pour les chansons spécifiques
+  préprogrammées (chacun avec sa propre chorégraphie scriptée, bien
+  plus expressive que la danse rythmique par défaut). Consulte la
+  liste des outils disponibles pour voir quelles chansons sont
+  couvertes ; chaque outil documente lui-même ses déclencheurs (titre,
+  paroles, personnage, film, traduction…). Quand une chanson demandée
+  est couverte par un tel outil, APPELLE-LE plutôt que `play_melody`.
 
 # Règles
 - Tu agis EXCLUSIVEMENT par appels d'outils. Pas de texte de réponse,
@@ -261,23 +242,17 @@ _PLAY_MELODY_TOOL = {
         "durées s'expriment en battements (1.0 = noire) ; sinon en "
         "secondes. Le robot accompagne automatiquement la mélodie "
         "d'une danse rythmée (antennes + tête au tempo) — n'émets "
-        "PAS `move_sequence` en parallèle. "
-        "Alternative : `melody_id='macarena'` joue un hook latin "
-        "original (clin d'œil, PAS la chanson protégée) accompagné "
-        "d'une chorégraphie body_yaw + antennes scriptée. Quand "
-        "`melody_id` est fourni, `notes` et `tempo_bpm` sont ignorés."
+        "PAS `move_sequence` en parallèle. NE PAS utiliser pour les "
+        "chansons couvertes par un outil dédié `play_<chanson>` "
+        "(p. ex. `play_macarena`, `play_let_it_go`) — ces outils ont "
+        "leur propre chorégraphie scriptée, bien plus expressive."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "melody_id": {
-                "type": "string",
-                "description": "Mélodie préprogrammée (override `notes`). À utiliser quand l'utilisateur demande explicitement la Macarena.",
-                "enum": ["macarena"],
-            },
             "notes": {
                 "type": "array",
-                "description": "Suite ordonnée de notes (8 à 32 typiquement, max 64). Requis sauf si `melody_id` est fourni.",
+                "description": "Suite ordonnée de notes (8 à 32 typiquement, max 64).",
                 "items": {
                     "type": "object",
                     "properties": {
@@ -298,6 +273,7 @@ _PLAY_MELODY_TOOL = {
                 "description": "Optionnel. Tempo en battements par minute (30..300). Si fourni, `duration` est interprété en battements.",
             },
         },
+        "required": ["notes"],
     },
 }
 
@@ -307,10 +283,16 @@ def build_tools(emotion_names: list[str]) -> list[dict]:
     populated from the actual emotion library (instead of a hardcoded
     constant that drifts from the dataset).
 
+    Each registered melody bundle is appended as its own top-level
+    tool (e.g. `play_macarena`, `play_let_it_go`) — see
+    `melody_tools/__init__.py` for the registry.
+
     Output is in Realtime API format (`{type, name, description,
     parameters}`). Chat Completions wraps the function spec under a
     `function` key — use `to_chat_tools()` to convert.
     """
+    from .melody_tools import BUNDLES
+
     return [
         {
             "type": "function",
@@ -336,6 +318,7 @@ def build_tools(emotion_names: list[str]) -> list[dict]:
         _LOOK_TOOL,
         _MOVE_SEQUENCE_TOOL,
         _PLAY_MELODY_TOOL,
+        *(b.to_tool_spec() for b in BUNDLES),
     ]
 
 
