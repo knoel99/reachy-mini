@@ -2,7 +2,9 @@
 
 `play(notes, tempo_bpm=None)` synthesises the whole buffer in one
 shot, pushes it via `mini.media.push_audio_sample` (the same channel
-used by `EmotionPlayer`), then sleeps until the audio has played out.
+used by `EmotionPlayer`), then drives a head + antenna dance whose
+per-step durations match the note timeline so motion stays locked to
+the rhythm.
 
 Like `EmotionPlayer`, this module never spawns threads — concurrency
 is the caller's job (`RobotActions._run_async`). A monotonic
@@ -19,6 +21,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from ._log import log
+from .tools import _make_head_pose
 
 if TYPE_CHECKING:
     from reachy_mini import ReachyMini
@@ -53,12 +56,24 @@ _DECAY_S = 0.050
 _SUSTAIN_LVL = 0.7
 _RELEASE_S = 0.080
 
+# Dance choreography. Antennas flap on every note (alternating sign);
+# head rolls slightly side to side with amplitude scaled by pitch.
+_DANCE_ANTENNA_BASE_DEG = 12.0
+_DANCE_ANTENNA_GAIN_DEG = 35.0
+_DANCE_HEAD_ROLL_DEG = 6.0
+_DANCE_HEAD_PITCH_DEG = 3.0
+# Amplitude floor so silent / rest steps still wiggle a little.
+_DANCE_MIN_AMP = 0.25
+# Pitch range mapped to amplitude 0..1 (MIDI 55=G3 through 84=C6).
+_DANCE_PITCH_LOW_MIDI = 55
+_DANCE_PITCH_HIGH_MIDI = 84
+
 _PITCH_RE = re.compile(r"^([A-Ga-g])([#b]?)(-?\d+)$")
 _NOTE_OFFSETS = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
 
 
-def _pitch_to_hz(pitch: str) -> float | None:
-    """Parse scientific pitch notation ('C4', 'F#5', 'Bb3') to Hz.
+def _pitch_to_midi(pitch: str) -> int | None:
+    """Parse scientific pitch notation ('C4', 'F#5', 'Bb3') to a MIDI number.
 
     Returns None for rests ('R'/'rest') or out-of-range pitches.
     """
@@ -80,6 +95,14 @@ def _pitch_to_hz(pitch: str) -> float | None:
     midi = 12 * (int(octave_s) + 1) + semitone
     if midi < _MIN_MIDI or midi > _MAX_MIDI:
         log(f"[melody] pitch {pitch!r} out of range (midi={midi})")
+        return None
+    return midi
+
+
+def _pitch_to_hz(pitch: str) -> float | None:
+    """Parse scientific pitch notation ('C4', 'F#5', 'Bb3') to Hz."""
+    midi = _pitch_to_midi(pitch)
+    if midi is None:
         return None
     return 440.0 * (2.0 ** ((midi - 69) / 12.0))
 
@@ -148,9 +171,14 @@ class MelodyPlayer:
         wave *= MelodyPlayer._envelope(n, rate)
         return wave.astype(np.float32, copy=False)
 
-    def _synthesize(
+    def _resolve_notes(
         self, notes: list[dict], tempo_bpm: float | None
-    ) -> np.ndarray:
+    ) -> list[tuple[int | None, float, int]]:
+        """Normalise the LLM-supplied notes into ``(midi, dur_s, n_samples)``.
+
+        Shared by audio synthesis and motion choreography so the two
+        timelines stay sample-accurate.
+        """
         rate = self._target_rate
         beat_s: float | None = None
         if tempo_bpm is not None:
@@ -165,7 +193,7 @@ class MelodyPlayer:
             log(f"[melody] {len(notes)} notes > {_MAX_NOTES}, truncating")
             notes = notes[:_MAX_NOTES]
 
-        chunks: list[np.ndarray] = []
+        out: list[tuple[int | None, float, int]] = []
         for note in notes:
             if not isinstance(note, dict):
                 continue
@@ -176,30 +204,94 @@ class MelodyPlayer:
                 raw_dur = 0.25
             dur_s = raw_dur * beat_s if beat_s is not None else raw_dur
             dur_s = max(_MIN_DUR_S, min(_MAX_DUR_S, dur_s))
-
             n = int(rate * dur_s)
             if n <= 0:
                 continue
+            out.append((_pitch_to_midi(pitch), dur_s, n))
+        return out
 
-            freq = _pitch_to_hz(pitch)
-            if freq is None:
+    def _synthesize(
+        self, resolved: list[tuple[int | None, float, int]]
+    ) -> np.ndarray:
+        rate = self._target_rate
+        chunks: list[np.ndarray] = []
+        for midi, dur_s, n in resolved:
+            if midi is None:
                 chunks.append(np.zeros(n, dtype=np.float32))
                 continue
-
+            freq = 440.0 * (2.0 ** ((midi - 69) / 12.0))
             chunks.append(self._render_note(freq, dur_s, n, rate))
 
         if not chunks:
             return np.zeros(0, dtype=np.float32)
         return np.concatenate(chunks).astype(np.float32, copy=False)
 
+    def _dance(
+        self, resolved: list[tuple[int | None, float, int]]
+    ) -> None:
+        """Drive head + antennas in lockstep with the synthesised audio.
+
+        One ``goto_target`` step per note; antennas alternate flap
+        direction; pitch height drives amplitude. The sum of step
+        durations equals the audio length, so motion stays locked to
+        the rhythm.
+        """
+        if not resolved:
+            return
+
+        from reachy_mini.reachy_mini import (
+            INIT_ANTENNAS_JOINT_POSITIONS,
+            INIT_HEAD_POSE,
+        )
+
+        pitch_span = _DANCE_PITCH_HIGH_MIDI - _DANCE_PITCH_LOW_MIDI
+        for i, (midi, dur_s, _n) in enumerate(resolved):
+            sign = 1.0 if i % 2 == 0 else -1.0
+            if midi is None:
+                amp = _DANCE_MIN_AMP
+            else:
+                norm = (midi - _DANCE_PITCH_LOW_MIDI) / pitch_span
+                amp = max(_DANCE_MIN_AMP, min(1.0, norm))
+
+            antenna_l_deg = sign * (
+                _DANCE_ANTENNA_BASE_DEG + amp * _DANCE_ANTENNA_GAIN_DEG
+            )
+            antenna_r_deg = -antenna_l_deg
+            roll_deg = sign * _DANCE_HEAD_ROLL_DEG * amp
+            pitch_deg = -_DANCE_HEAD_PITCH_DEG * amp
+
+            pose = _make_head_pose(roll_deg=roll_deg, pitch_deg=pitch_deg)
+            antennas = [
+                np.deg2rad(antenna_l_deg),
+                np.deg2rad(antenna_r_deg),
+            ]
+            try:
+                self.mini.goto_target(
+                    pose, antennas=antennas, duration=dur_s
+                )
+            except Exception as e:
+                log(f"[melody] dance step failed: {e}")
+                return
+
+        try:
+            self.mini.goto_target(
+                INIT_HEAD_POSE,
+                antennas=INIT_ANTENNAS_JOINT_POSITIONS,
+                duration=0.4,
+            )
+        except Exception as e:
+            log(f"[melody] return to neutral failed: {e}")
+
     def play(
         self, notes: list[dict], tempo_bpm: float | None = None
     ) -> bool:
-        """Synthesise + push + block until the audio has played out."""
+        """Synthesise + push audio, dance to the rhythm, then block
+        until the audio has played out."""
         if not notes:
             return False
 
-        samples = self._synthesize(notes, tempo_bpm)
+        resolved = self._resolve_notes(notes, tempo_bpm)
+        samples = self._synthesize(resolved)
         if samples.size == 0:
             log("[melody] empty buffer after synthesis")
             return False
@@ -213,6 +305,7 @@ class MelodyPlayer:
             except Exception as e:
                 log(f"[melody] push_audio_sample failed: {e}")
                 return False
+            self._dance(resolved)
             rem = self._speaking_until - time.monotonic()
             if rem > 0:
                 time.sleep(rem)
